@@ -1,0 +1,17 @@
+.env
+__pycache__
+
+node_modules/
+dockerignore
+nginx.conf
+
+package-lock.json
+package.json
+
+Screenshots
+vectorstore
+backend_code.txt
+frontend_code.txt
+Notes for Running.txt
+
+documents

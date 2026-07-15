@@ -1,0 +1,59 @@
+services:
+
+  # ── MySQL Database ─────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: ragdb_mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ── ChromaDB container ─────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: ragdb_chroma
+    restart: always
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+
+  # ── FastAPI Backend ────────────────────────────────────────────
+  backend:
+    build: .                        # ← root folder (not ./backend)
+    container_name: ragdb_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./documents:/app/documents
+      - ./vectorstore:/app/vectorstore
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # ── React Frontend ─────────────────────────────────────────────
+  frontend:
+    build: ./Frontend               # ← capital F to match your folder name
+    container_name: ragdb_frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+  chroma_data:
