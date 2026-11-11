@@ -1,5 +1,7 @@
 # DocMind — RAG Assistant with Role-Based Access Control
 
+[![CI](https://github.com/mkarthikaravind1/DocMind---RAG-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/mkarthikaravind1/DocMind---RAG-Assistant/actions/workflows/ci.yml)
+
 DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that lets users upload PDF documents and ask natural-language questions about their contents. It combines a FastAPI backend, a Chroma vector store, and a Groq-hosted LLM for answer generation, wrapped in JWT authentication and a three-tier role-based access control (RBAC) system (`employee`, `manager`, `admin`). The system includes input/output guardrails, an admin monitoring dashboard, and Docker support for deployment.
 
 ## Features
@@ -16,6 +18,7 @@ DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that le
 - **Source Citations** — every answer shows where it came from. Retrieved excerpts are numbered in the prompt, the model cites them inline as `[1]`, `[2]`, and the API returns the cited sources (document, page number, excerpt). In the chat, each marker and source chip opens the exact excerpt, so answers can be verified at a glance. Sources pass through the same PII redaction as answers and can only come from documents the user's role may access.
 - **Streaming Answers** — answers are written into the chat live, token by token, over Server-Sent Events (`/chat/stream`). Streaming does not weaken the guardrails: a streaming redactor holds back any text that could still be part of a card number, phone number or email and releases only text that is safe, so PII is never shown even for an instant. The final event carries the cited sources.
 - **Conversation Memory & Chat History** — chats are saved per user and can be reopened, continued or deleted from the Chats tab; the current chat survives a page refresh. Follow-up questions ("from when does it start?") are rewritten into standalone questions using the recent turns before retrieval. History is used *only* for that rewrite: every answer is still built from freshly retrieved, access-filtered excerpts, so memory can never re-serve content from a document the user has since lost access to. Conversations are private to their owner, including from admins.
+- **Automated Tests & CI** — a pytest suite of about 100 tests runs the real application in-process and covers authentication, role boundaries, document-level access control, citations, streaming redaction and conversation memory. It needs no Docker, database server or API key, and GitHub Actions runs it (plus the frontend build) on every push and pull request.
 - **Guardrails**
   - **Input validation** — blocks overly long inputs and known prompt-injection patterns (e.g. "ignore previous instructions", "jailbreak", "DAN mode").
   - **Context-grounded answers** — the LLM is strictly prompted to answer only from retrieved document context, with a fixed fallback response when the answer isn't found.
@@ -86,6 +89,8 @@ RAG_RBAC_Project/
 └── routes/
     ├── auth_routes.py       # /auth/register, /auth/login, /auth/me
     └── conversation_routes.py  # /conversations (list, open, delete)
+tests/                      # pytest suite (see Testing below)
+.github/workflows/ci.yml    # GitHub Actions: backend tests + frontend build
 
 Frontend/
 ├── Dockerfile               # Multi-stage build (Node → Nginx)
@@ -171,6 +176,38 @@ To run only ChromaDB in Docker while the backend runs locally with `uvicorn`:
 ```bash
 docker run -d -p 8001:8000 -v chroma_data:/data --name chroma chromadb/chroma:1.5.9
 ```
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite starts the real FastAPI application in-process and replaces only what is external to it:
+
+| Production | In tests |
+|---|---|
+| MySQL | a temporary SQLite file (`DATABASE_URL`) |
+| ChromaDB server | an in-memory Chroma client |
+| MiniLM embedding model | a deterministic keyword-hashing stand-in |
+| Groq LLM | a rule-based stand-in that records every prompt it receives |
+
+Because the stand-in LLM records its prompts, the tests can assert something a black-box test cannot: that text from a
+restricted document was **never sent to the model at all**, not merely absent from the answer.
+
+| File | What it covers |
+|---|---|
+| `tests/test_guardrails.py` | Prompt-injection patterns, PII redaction, and the streaming redactor checked against thousands of random token splits |
+| `tests/test_access.py` | Document access rules |
+| `tests/test_auth.py` | Registration, login, forged and expired tokens, role management |
+| `tests/test_documents.py` | Upload and delete permissions, path traversal, re-upload, audiences, access changes |
+| `tests/test_chat.py` | Answers, citations, redaction, access-filtered retrieval, streaming |
+| `tests/test_conversations.py` | Follow-up rewriting, saved history, privacy, memory after access is revoked |
+| `tests/test_monitoring.py` | Query logs, stats, CORS |
+
+The stand-ins make the suite fast and repeatable, but they do not judge the quality of a real model's answers; that
+still needs a run against the live stack.
 ---
 ## Screenshots
 
@@ -227,7 +264,6 @@ docker run -d -p 8001:8000 -v chroma_data:/data --name chroma chromadb/chroma:1.
 ## Future Improvements
 
 
-- Add automated tests for guardrails and RBAC permission boundaries.
 
 --- 
 ## Developed By

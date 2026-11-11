@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
@@ -22,11 +23,22 @@ from models import User, QueryLog, Document
 from rag import get_answer, stream_answer
 from routes.auth_routes import router as auth_router
 from routes.conversation_routes import router as conversation_router
+from vector_store import get_embeddings
 
 # Create DB tables on startup
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load the embedding model before the first request, so the first upload
+    # or question is not slow. Set PRELOAD_EMBEDDINGS=0 to skip (tests do).
+    if os.getenv("PRELOAD_EMBEDDINGS", "1") == "1":
+        get_embeddings()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Comma-separated list, e.g. CORS_ORIGINS=http://localhost:3000,https://myapp.com
 CORS_ORIGINS = [
@@ -44,7 +56,8 @@ app.add_middleware(
 )
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "documents")
+# UPLOAD_DIR can be overridden (the test suite points it at a temporary folder)
+UPLOAD_DIR = os.getenv("UPLOAD_DIR") or os.path.join(BASE_DIR, "documents")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Include auth routes
