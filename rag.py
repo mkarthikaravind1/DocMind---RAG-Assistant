@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 
+from access import role_filter
 from guardrails import FALLBACK_ANSWER, build_strict_prompt, check_pii_in_response
 from vector_store import get_vectorstore
 
@@ -22,11 +23,15 @@ TOP_K = 3
 MAX_DISTANCE = float(os.getenv("RETRIEVAL_MAX_DISTANCE", "1.6"))
 
 
-def get_answer(question: str) -> dict:
+def get_answer(question: str, user_role: str) -> dict:
     """Returns answer + metadata for monitoring."""
     db = get_vectorstore()
 
-    scored_docs = db.similarity_search_with_score(question, k=TOP_K)
+    # Document-level RBAC: the search itself only sees chunks this role is
+    # allowed to read, so restricted text can never end up in the prompt.
+    scored_docs = db.similarity_search_with_score(
+        question, k=TOP_K, filter=role_filter(user_role)
+    )
 
     # Keep only the strongly matching chunks when there are any, so weak
     # neighbours do not dilute the context. Broad requests such as

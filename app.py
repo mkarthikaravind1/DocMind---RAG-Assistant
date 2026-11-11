@@ -4,17 +4,18 @@ import shutil
 import time
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from access import DEFAULT_ROLES, can_access, normalize_roles, roles_from_str, roles_to_str
 from database import engine, Base, get_db
 from dependencies import get_current_user, require_role
 from guardrails import validate_input
-from ingest import ingest_pdf, delete_document_chunks, IngestError
-from models import User, QueryLog
+from ingest import ingest_pdf, delete_document_chunks, set_document_roles, IngestError
+from models import User, QueryLog, Document
 from rag import get_answer
 from routes.auth_routes import router as auth_router
 
@@ -63,61 +64,133 @@ def safe_pdf_name(filename: str) -> str:
 # so FastAPI runs them in a threadpool instead of freezing the event loop.
 
 # ── Protected routes ───────────────────────────────────────────────
+def _doc_payload(doc: Document) -> dict:
+    return {
+        "filename":      doc.filename,
+        "allowed_roles": roles_from_str(doc.allowed_roles),
+        "uploaded_by":   doc.uploaded_by,
+        "indexed":       True,
+    }
+
+
 @app.get("/files")
-def list_docs(current_user: User = Depends(get_current_user)):
-    files = sorted(f for f in os.listdir(UPLOAD_DIR) if f.lower().endswith(".pdf"))
-    return {"docs": files}
+def list_docs(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Only the documents the caller's role is allowed to see."""
+    role = str(current_user.role)
+    records = db.query(Document).order_by(Document.filename).all()
+
+    documents = [
+        _doc_payload(d) for d in records
+        if can_access(role, roles_from_str(d.allowed_roles))
+    ]
+
+    # PDFs on disk with no access record (uploaded before document-level RBAC
+    # existed) are not searchable. Only admins see them, flagged for re-upload.
+    if role == "admin":
+        known = {d.filename for d in records}
+        for f in sorted(os.listdir(UPLOAD_DIR)):
+            if f.lower().endswith(".pdf") and f not in known:
+                documents.append({
+                    "filename": f, "allowed_roles": ["admin"],
+                    "uploaded_by": None, "indexed": False,
+                })
+
+    return {
+        "docs":      [d["filename"] for d in documents if d["indexed"]],
+        "documents": documents,
+    }
 
 # ── Manager + Admin only ───────────────────────────────────────────
 @app.post("/upload")
 def upload_file(
     file: UploadFile = File(...),
+    # Comma-separated roles allowed to read the document, e.g. "manager,admin"
+    allowed_roles: str = Form(",".join(DEFAULT_ROLES)),
     current_user: User = Depends(require_role("admin", "manager")),
+    db: Session = Depends(get_db),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
+    role = str(current_user.role)
+    try:
+        roles = normalize_roles(allowed_roles)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not can_access(role, roles):
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot upload a document that your own role is not allowed to access.",
+        )
+
     filename  = safe_pdf_name(file.filename)
     file_path = os.path.join(UPLOAD_DIR, filename)
-    already_existed = os.path.exists(file_path)
+
+    record = db.query(Document).filter(Document.filename == filename).first()
+    # A manager must not be able to overwrite (or learn the contents of)
+    # a document that is restricted to admins.
+    if record and not can_access(role, roles_from_str(record.allowed_roles)):
+        raise HTTPException(
+            status_code=409,
+            detail="A document with this name already exists. Please rename your file.",
+        )
+    already_existed = record is not None or os.path.exists(file_path)
 
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     try:
-        chunks = ingest_pdf(file_path)
+        chunks = ingest_pdf(file_path, roles)
     except IngestError as e:
-        _cleanup_failed_upload(file_path, filename)
+        _cleanup_failed_upload(file_path, filename, db)
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         # A file that was never indexed must not show up as "Ready"
-        _cleanup_failed_upload(file_path, filename)
+        _cleanup_failed_upload(file_path, filename, db)
         print(f"[UPLOAD] Ingestion failed for {filename}: {e}")
         raise HTTPException(
             status_code=500,
             detail="Could not index this file. Check that it is a valid PDF and that ChromaDB is running.",
         )
 
+    if record is None:
+        record = Document(filename=filename)
+        db.add(record)
+    setattr(record, "allowed_roles", roles_to_str(roles))
+    setattr(record, "uploaded_by", str(current_user.email))
+    setattr(record, "chunks", chunks)
+    setattr(record, "uploaded_at", datetime.now(timezone.utc))
+    db.commit()
+
     return {
-        "filename": filename,
-        "status":   "replaced and re-ingested" if already_existed else "uploaded and ingested",
-        "chunks":   chunks,
+        "filename":      filename,
+        "status":        "replaced and re-ingested" if already_existed else "uploaded and ingested",
+        "chunks":        chunks,
+        "allowed_roles": roles,
+        "uploaded_by":   str(current_user.email),
+        "indexed":       True,
     }
 
 
-def _cleanup_failed_upload(file_path: str, filename: str) -> None:
+def _cleanup_failed_upload(file_path: str, filename: str, db: Session) -> None:
     if os.path.exists(file_path):
         os.remove(file_path)
     try:
         delete_document_chunks(filename)
     except Exception:
         pass  # vector store unreachable: nothing was stored anyway
+    db.query(Document).filter(Document.filename == filename).delete()
+    db.commit()
 
 # ── Admin only ─────────────────────────────────────────────────────
 @app.delete("/delete/{filename}")
 def delete_file(
     filename: str,
-    current_user: User = Depends(require_role("admin"))
+    current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
 ):
     filename  = safe_pdf_name(filename)
     file_path = os.path.join(UPLOAD_DIR, filename)
@@ -135,7 +208,45 @@ def delete_file(
         )
 
     os.remove(file_path)
+    db.query(Document).filter(Document.filename == filename).delete()
+    db.commit()
     return {"message": f"{filename} deleted successfully"}
+
+# ── Admin: change who can access a document ────────────────────────
+class AccessUpdateRequest(BaseModel):
+    allowed_roles: list[str]
+
+@app.patch("/documents/{filename}/access")
+def update_document_access(
+    filename: str,
+    body: AccessUpdateRequest,
+    current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    filename = safe_pdf_name(filename)
+    try:
+        roles = normalize_roles(body.allowed_roles)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    record = db.query(Document).filter(Document.filename == filename).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Vector store first: if it fails, the database still shows the old
+    # (still enforced) audience instead of a new one that is not in effect.
+    try:
+        set_document_roles(filename, roles)
+    except Exception as e:
+        print(f"[ACCESS] Could not update chunks for {filename}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not reach the vector store. Access was not changed.",
+        )
+
+    setattr(record, "allowed_roles", roles_to_str(roles))
+    db.commit()
+    return _doc_payload(record)
 
 class ChatRequest(BaseModel):
     question: str
@@ -203,7 +314,7 @@ def chat(
     # ── RAG call with timing ──────────────────────────────────────
     start = time.time()
     try:
-        result = get_answer(question)
+        result = get_answer(question, str(current_user.role))
     except Exception as e:
         print(f"[CHAT] RAG pipeline failed: {e}")
         raise HTTPException(

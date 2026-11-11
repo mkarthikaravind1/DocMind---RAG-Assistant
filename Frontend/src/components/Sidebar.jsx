@@ -111,12 +111,35 @@ const styles = {
   },
 };
 
-export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token , role}) {
+// Who may read a document. Admins are always included.
+const AUDIENCES = [
+  { key: 'everyone', label: 'Everyone',          short: 'Everyone', icon: 'ti-users',  roles: ['employee', 'manager', 'admin'] },
+  { key: 'managers', label: 'Managers & Admins', short: 'Managers', icon: 'ti-lock',   roles: ['manager', 'admin'] },
+  { key: 'admins',   label: 'Admins only',       short: 'Admins',   icon: 'ti-shield-lock', roles: ['admin'] },
+];
+
+const audienceOf = (allowedRoles = []) => (
+  allowedRoles.includes('employee') ? AUDIENCES[0]
+    : allowedRoles.includes('manager') ? AUDIENCES[1]
+    : AUDIENCES[2]
+);
+
+const audienceColors = {
+  everyone: { bg: 'var(--success-dim)', color: 'var(--success)' },
+  managers: { bg: 'var(--accent-dim)',  color: 'var(--accent-light)' },
+  admins:   { bg: 'var(--danger-dim)',  color: 'var(--danger)' },
+};
+
+export default function Sidebar({ docs, onUploadSuccess, onDeleteSuccess, onAccessChange, token , role}) {
   const fileRef = useRef(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [status, setStatus] = useState(null); // { type: 'loading'|'success'|'error', msg }
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [audience, setAudience] = useState('everyone');   // who can read the next upload
+  const [savingAccess, setSavingAccess] = useState(null); // filename being updated
+  // A manager cannot publish a document their own role would be locked out of
+  const audienceOptions = AUDIENCES.filter(a => role === 'admin' || a.roles.includes(role));
   const [selectedTab, setActiveTab] = useState('docs');
   // If an admin is demoted while on the Users/Logs tab, fall back to Docs
   const activeTab = role === 'admin' ? selectedTab : 'docs';
@@ -139,13 +162,15 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
 
     const form = new FormData();
     form.append('file', selectedFile);
+    const chosen = audienceOptions.find(a => a.key === audience) || AUDIENCES[0];
+    form.append('allowed_roles', chosen.roles.join(','));
 
     try {
       const res = await fetch(`${API}/upload`, { method: 'POST', headers: {Authorization: `Bearer ${token}` }, body: form });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setStatus({ type: 'success', msg: `"${data.filename}" ready` });
-        onUploadSuccess(data.filename);
+        onUploadSuccess({ filename: data.filename, allowed_roles: data.allowed_roles, indexed: true });
         setSelectedFile(null);
         if (fileRef.current) fileRef.current.value = '';
       } else {
@@ -173,6 +198,29 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
     } catch {
       setStatus({ type: 'error', msg: 'Cannot connect to backend' });
     }
+  };
+
+  const handleAccessChange = async (filename, audienceKey) => {
+    const chosen = AUDIENCES.find(a => a.key === audienceKey);
+    if (!chosen) return;
+    setSavingAccess(filename);
+    try {
+      const res = await fetch(`${API}/documents/${encodeURIComponent(filename)}/access`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ allowed_roles: chosen.roles }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        onAccessChange({ filename, allowed_roles: data.allowed_roles });
+        setStatus({ type: 'success', msg: `"${filename}" is now: ${chosen.label}` });
+      } else {
+        setStatus({ type: 'error', msg: errorMessage(data, 'Could not change access') });
+      }
+    } catch {
+      setStatus({ type: 'error', msg: 'Cannot connect to backend' });
+    }
+    setSavingAccess(null);
   };
 
   const statusColors = {
@@ -276,6 +324,38 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
           </div>
         </div>
 
+        {/* Audience picker: who can read this document */}
+        <div style={{ ...styles.sectionLabel, marginBottom: '7px' }}>Who can access it</div>
+        <div style={{ display: 'flex', gap: '5px', marginBottom: '10px', flexWrap: 'wrap' }}>
+          {audienceOptions.map(a => {
+            const active = audience === a.key;
+            return (
+              <button
+                key={a.key}
+                onClick={() => setAudience(a.key)}
+                title={a.label}
+                style={{
+                  flex: 1,
+                  padding: '6px 6px',
+                  borderRadius: 'var(--radius-sm)',
+                  border: `1px solid ${active ? audienceColors[a.key].color : 'var(--border2)'}`,
+                  background: active ? audienceColors[a.key].bg : 'transparent',
+                  color: active ? audienceColors[a.key].color : 'var(--text3)',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  transition: 'all var(--transition)',
+                }}
+              >
+                <i className={`ti ${a.icon}`} style={{ marginRight: '4px' }} />
+                {a.short}
+              </button>
+            );
+          })}
+        </div>
+
         {/* Status */}
         {status && (
           <div style={{
@@ -336,14 +416,62 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
         {docs.length === 0 ? (
           <div style={styles.emptyDocs}>
             <i className="ti ti-files" style={{ fontSize: '30px', display: 'block', marginBottom: '8px', opacity: 0.25 }} />
-            No documents yet.<br />Upload a PDF to begin.
+            {role === 'employee'
+              ? <>No documents are available<br />to your role yet.</>
+              : <>No documents yet.<br />Upload a PDF to begin.</>}
           </div>
         ) : (
-          docs.map((name, i) => (
-            <div key={i} style={styles.docItem}>
+          docs.map((doc) => {
+            const name = doc.filename;
+            const aud = audienceOf(doc.allowed_roles);
+            const unindexed = doc.indexed === false;
+            return (
+            <div key={name} style={styles.docItem}>
               <i className="ti ti-file-type-pdf" style={{ color: 'var(--danger)', fontSize: '16px', flexShrink: 0 }} />
-              <span style={styles.docName}>{name}</span>
-              <span style={styles.docBadge}>Ready</span>
+              <span style={styles.docName} title={name}>{name}</span>
+              {unindexed ? (
+                // On disk but never given an access record: not searchable
+                <span
+                  style={{ ...styles.docBadge, background: 'var(--danger-dim)', color: 'var(--danger)' }}
+                  title="This file was uploaded before access control existed. Upload it again to make it searchable."
+                >
+                  Re-upload
+                </span>
+              ) : role === 'admin' ? (
+                // Admins can change the audience without re-uploading
+                <select
+                  value={aud.key}
+                  disabled={savingAccess === name}
+                  onChange={e => handleAccessChange(name, e.target.value)}
+                  title="Who can access this document"
+                  style={{
+                    fontSize: '10px',
+                    fontWeight: 600,
+                    fontFamily: 'var(--font-body)',
+                    padding: '2px 4px',
+                    borderRadius: '20px',
+                    border: 'none',
+                    outline: 'none',
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                    maxWidth: '82px',
+                    background: audienceColors[aud.key].bg,
+                    color: audienceColors[aud.key].color,
+                  }}
+                >
+                  {AUDIENCES.map(a => <option key={a.key} value={a.key}>{a.short}</option>)}
+                </select>
+              ) : role === 'manager' ? (
+                <span
+                  style={{ ...styles.docBadge, background: audienceColors[aud.key].bg, color: audienceColors[aud.key].color }}
+                  title={`Access: ${aud.label}`}
+                >
+                  <i className={`ti ${aud.icon}`} style={{ marginRight: '3px' }} />
+                  {aud.short}
+                </span>
+              ) : (
+                <span style={styles.docBadge}>Ready</span>
+              )}
               {/* Show delete button on each doc item (Admin only)*/}
               {role === 'admin' && (
                 <button
@@ -361,7 +489,8 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
                 </button>
               )}
             </div>
-          ))
+            );
+          })
         )}
         </div>
       </>) : activeTab === 'users'? (

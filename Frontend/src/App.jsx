@@ -62,7 +62,8 @@ export default function App() {
 
         if (filesRes.ok) {
           const data = await filesRes.json();
-          setDocs(Array.isArray(data.docs) ? data.docs : []);
+          // Already filtered by the server to what this role may see
+          setDocs(Array.isArray(data.documents) ? data.documents : []);
         }
         if (meRes.ok) {
           // Live role from the server, so an admin's role change shows up without re-login
@@ -142,17 +143,24 @@ export default function App() {
     setInputValue(text);
   };
 
-  const handleDocChange = (filename, action) => {
+  // doc = { filename, allowed_roles, indexed }
+  const handleDocChange = (doc, action) => {
     if (action === 'delete') {
-      setDocs(prev => prev.filter(d => d !== filename));
+      setDocs(prev => prev.filter(d => d.filename !== doc.filename));
     } else {
-      // Re-uploading a file replaces it, so never list it twice
-      setDocs(prev => (prev.includes(filename) ? prev : [...prev, filename]));
+      // Add, or replace in place (re-upload / access change): never list a file twice
+      setDocs(prev => (
+        prev.some(d => d.filename === doc.filename)
+          ? prev.map(d => (d.filename === doc.filename ? { ...d, ...doc } : d))
+          : [...prev, doc]
+      ));
     }
   };
 
   const hasMessages = messages.length > 0;
-  const hasDocs = docs.length > 0;
+  // Files without an access record are listed for admins but are not searchable
+  const indexedCount = docs.filter(d => d.indexed !== false).length;
+  const hasDocs = indexedCount > 0;
 
   // Backend status indicator config
   const statusConfig = {
@@ -170,8 +178,9 @@ export default function App() {
       {/* Sidebar */}
       <Sidebar
         docs={docs}
-        onUploadSuccess={(name) => handleDocChange(name, 'add')}
-        onDeleteSuccess={(name) => handleDocChange(name, 'delete')}
+        onUploadSuccess={(doc) => handleDocChange(doc, 'add')}
+        onAccessChange={(doc) => handleDocChange(doc, 'update')}
+        onDeleteSuccess={(filename) => handleDocChange({ filename }, 'delete')}
         token={token}
         role={role}
       />
@@ -206,8 +215,8 @@ export default function App() {
             }} />
             <span style={{ fontSize: '14px', fontWeight: 500, color: 'var(--text)' }}>
               {hasDocs
-                ? `${docs.length} document${docs.length > 1 ? 's' : ''} indexed`
-                : 'No documents indexed'}
+                ? `${indexedCount} document${indexedCount > 1 ? 's' : ''} available to you`
+                : 'No documents available'}
             </span>
           </div>
 

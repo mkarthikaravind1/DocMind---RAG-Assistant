@@ -16,6 +16,16 @@ class User(Base):
     hashed_password = Column(String(255))
     role = Column(String(50), default="employee")
 
+class Document(Base):
+    __tablename__ = "documents"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    filename      = Column(String(255), unique=True, index=True)
+    allowed_roles = Column(String(100))       # comma-separated, e.g. "manager,admin"
+    uploaded_by   = Column(String(100))
+    chunks        = Column(Integer)
+    uploaded_at   = Column(DateTime, default=utcnow)   # stored as UTC
+
 class QueryLog(Base):
     __tablename__ = "query_logs"
     id               = Column(Integer, primary_key=True, index=True)
