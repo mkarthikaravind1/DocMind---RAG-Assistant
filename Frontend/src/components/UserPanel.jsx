@@ -7,7 +7,8 @@ const ROLES = ['employee', 'manager', 'admin'];
 const roleColors = {
   admin:    { bg: 'var(--danger-dim)',  color: 'var(--danger)' },
   manager:  { bg: 'var(--accent-dim)', color: 'var(--accent-light)' },
-  employee: { bg: 'var(--surface3)',   color: 'var(--text3)' },
+  // Must differ from the inactive pill style, or the current role is invisible
+  employee: { bg: 'var(--success-dim)', color: 'var(--success)' },
 };
 
 export default function UserPanel({ token }) {

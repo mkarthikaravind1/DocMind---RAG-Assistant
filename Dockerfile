@@ -8,7 +8,12 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# CPU-only PyTorch first: the default wheel bundles several GB of GPU (CUDA)
+# libraries this app never uses, which made the image ~9 GB and the build slow.
+RUN pip install --no-cache-dir --default-timeout=120 --retries 10 \
+    torch --index-url https://download.pytorch.org/whl/cpu
+
+RUN pip install --no-cache-dir --default-timeout=120 --retries 10 -r requirements.txt
 
 # Copy all backend files from root
 COPY app.py auth.py database.py dependencies.py \

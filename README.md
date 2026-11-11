@@ -1,10 +1,10 @@
 # DocMind — RAG Assistant with Role-Based Access Control
 
-DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that lets users upload PDF documents and ask natural-language questions about their contents. It combines a FastAPI backend, a Chroma vector store, and the Groq LLaMA API for answer generation, wrapped in JWT authentication and a three-tier role-based access control (RBAC) system (`employee`, `manager`, `admin`). The system includes input/output guardrails, an admin monitoring dashboard, and Docker support for deployment.
+DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that lets users upload PDF documents and ask natural-language questions about their contents. It combines a FastAPI backend, a Chroma vector store, and a Groq-hosted LLM for answer generation, wrapped in JWT authentication and a three-tier role-based access control (RBAC) system (`employee`, `manager`, `admin`). The system includes input/output guardrails, an admin monitoring dashboard, and Docker support for deployment.
 
 ## Features
 
-- **Document Q&A (RAG)** — Upload PDFs, which are chunked, embedded with `sentence-transformers/all-MiniLM-L6-v2`, and stored in a Chroma vector database. Questions are answered using semantic similarity search combined with the Groq-hosted `llama-3.3-70b-versatile` model.
+- **Document Q&A (RAG)** — Upload PDFs, which are chunked, embedded with `sentence-transformers/all-MiniLM-L6-v2`, and stored in a Chroma vector database. Questions are answered using semantic similarity search combined with a Groq-hosted LLM (default `openai/gpt-oss-120b`, set with `GROQ_MODEL`).
 - **JWT Authentication** — Email/password registration and login using `bcrypt` password hashing and signed JWTs (`python-jose`).
 - **Role-Based Access Control** — Three roles with distinct permissions:
   | Role | Upload Docs | Delete Docs | Ask Questions | Manage Users | View Logs |
@@ -25,7 +25,7 @@ DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that le
 
 ## Tech Stack
 
-**Backend:** FastAPI, SQLAlchemy, MySQL, Pydantic, python-jose (JWT), bcrypt, LangChain, ChromaDB, HuggingFace `sentence-transformers`, Groq API (LLaMA 3.3 70B)
+**Backend:** FastAPI, SQLAlchemy, MySQL, Pydantic, python-jose (JWT), bcrypt, LangChain, ChromaDB, HuggingFace `sentence-transformers`, Groq API (model configurable via `GROQ_MODEL`)
 
 **Frontend:** React 18 (Create React App), Tabler Icons, DM Sans / DM Serif Display (Google Fonts)
 
@@ -48,7 +48,7 @@ flowchart LR
 
     DB[(MySQL - Users and Query Logs)]
     Vector[(ChromaDB Vector Store)]
-    LLM[Groq LLaMA 3.3 70B]
+    LLM[Groq LLM]
 
     UI -->|Login/Register| Auth
     UI -->|Upload PDF| API
@@ -125,6 +125,7 @@ Frontend/
    CHROMA_HOST=localhost
    CHROMA_PORT=8001
    GROQ_API_KEY=your-groq-api-key
+   GROQ_MODEL=openai/gpt-oss-120b
    ```
    `SECRET_KEY` is generated once (`python -c "import secrets; print(secrets.token_hex(32))"`) and does not expire; only login tokens do, after 24 hours. The backend refuses to start without it.
 3. Start the API server:

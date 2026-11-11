@@ -9,12 +9,16 @@ from vector_store import get_vectorstore
 
 load_dotenv()
 
-llm = ChatGroq(model="llama-3.3-70b-versatile")
+# Groq retires models from time to time (llama-3.3-70b-versatile is gone),
+# so the model is set in .env rather than hardcoded. See the current list at
+# https://console.groq.com/docs/models
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+llm = ChatGroq(model=GROQ_MODEL, temperature=0)
 
 TOP_K = 3
 # Chroma returns a squared-L2 distance (0 = identical). With the normalised
 # MiniLM embeddings, 1.6 is roughly a cosine similarity of 0.2. Chunks further
-# away than this are treated as irrelevant. Tune with RETRIEVAL_MAX_DISTANCE.
+# away than this count as weak matches. Tune with RETRIEVAL_MAX_DISTANCE.
 MAX_DISTANCE = float(os.getenv("RETRIEVAL_MAX_DISTANCE", "1.6"))
 
 
@@ -23,7 +27,14 @@ def get_answer(question: str) -> dict:
     db = get_vectorstore()
 
     scored_docs = db.similarity_search_with_score(question, k=TOP_K)
-    retrieved_docs = [doc for doc, distance in scored_docs if distance <= MAX_DISTANCE]
+
+    # Keep only the strongly matching chunks when there are any, so weak
+    # neighbours do not dilute the context. Broad requests such as
+    # "summarize this document" match nothing strongly (they score the same as
+    # an unrelated question), so in that case pass the top chunks through and
+    # let the strict prompt decide whether the context answers the question.
+    strong_docs = [doc for doc, distance in scored_docs if distance <= MAX_DISTANCE]
+    retrieved_docs = strong_docs or [doc for doc, _ in scored_docs]
     chunks_retrieved = len(retrieved_docs)
 
     if not retrieved_docs:

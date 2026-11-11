@@ -50,6 +50,16 @@ export function TypingBubble() {
   );
 }
 
+// The LLM answers with light Markdown. Render **bold** as real bold text
+// (as React elements, never as raw HTML) instead of showing the asterisks.
+function renderText(text) {
+  return String(text).split(/(\*\*[^*\n]+\*\*)/g).map((part, i) =>
+    part.startsWith('**') && part.endsWith('**') && part.length > 4
+      ? <strong key={i}>{part.slice(2, -2)}</strong>
+      : part
+  );
+}
+
 export default function Message({ role, text }) {
   const isUser = role === 'user';
 
@@ -97,7 +107,7 @@ export default function Message({ role, text }) {
         whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
       }}>
-        {text}
+        {isUser ? text : renderText(text)}
       </div>
     </div>
   );

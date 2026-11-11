@@ -27,9 +27,11 @@ INJECTION_PATTERNS = [
 # Order matters: the longest patterns run first. If Aadhaar (12 digits) ran
 # before credit card (13-16 digits), a card number would only be partly redacted.
 PII_PATTERNS = {
-    "email":        r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
-    "credit_card":  r"\b\d(?:[ -]?\d){12,15}\b",               # Credit/debit card
-    "aadhaar":      r"\b\d{4}\s?\d{4}\s?\d{4}\b",              # Aadhaar
+    "email":        r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+",
+    # LLMs often write digit groups with non-breaking spaces or Unicode hyphens,
+    # so the separators accept any whitespace (\s) and any dash (U+2010-U+2015).
+    "credit_card":  r"\b\d(?:[\s\-‐-―]?\d){12,15}\b",                    # Credit/debit card
+    "aadhaar":      r"\b\d{4}[\s\-‐-―]?\d{4}[\s\-‐-―]?\d{4}\b",  # Aadhaar
     "phone_in":     r"\b[6-9]\d{9}\b",                          # Indian mobile
     "pan":          r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",              # PAN card
 }
