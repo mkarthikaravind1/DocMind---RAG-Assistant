@@ -15,6 +15,7 @@ DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that le
 - **Document-Level Access Control** — every document has an audience (*Everyone*, *Managers & Admins*, or *Admins only*) chosen at upload. The audience is stamped onto each chunk in the vector store and applied as a filter **inside the similarity search**, so text a user is not cleared for never reaches the LLM prompt — it cannot be leaked by clever prompting. The document list is filtered the same way, and admins can change a document's audience at any time without re-uploading.
 - **Source Citations** — every answer shows where it came from. Retrieved excerpts are numbered in the prompt, the model cites them inline as `[1]`, `[2]`, and the API returns the cited sources (document, page number, excerpt). In the chat, each marker and source chip opens the exact excerpt, so answers can be verified at a glance. Sources pass through the same PII redaction as answers and can only come from documents the user's role may access.
 - **Streaming Answers** — answers are written into the chat live, token by token, over Server-Sent Events (`/chat/stream`). Streaming does not weaken the guardrails: a streaming redactor holds back any text that could still be part of a card number, phone number or email and releases only text that is safe, so PII is never shown even for an instant. The final event carries the cited sources.
+- **Conversation Memory & Chat History** — chats are saved per user and can be reopened, continued or deleted from the Chats tab; the current chat survives a page refresh. Follow-up questions ("from when does it start?") are rewritten into standalone questions using the recent turns before retrieval. History is used *only* for that rewrite: every answer is still built from freshly retrieved, access-filtered excerpts, so memory can never re-serve content from a document the user has since lost access to. Conversations are private to their owner, including from admins.
 - **Guardrails**
   - **Input validation** — blocks overly long inputs and known prompt-injection patterns (e.g. "ignore previous instructions", "jailbreak", "DAN mode").
   - **Context-grounded answers** — the LLM is strictly prompted to answer only from retrieved document context, with a fixed fallback response when the answer isn't found.
@@ -73,6 +74,7 @@ flowchart LR
 RAG_RBAC_Project/
 ├── app.py                  # FastAPI app & route definitions
 ├── access.py               # Document-level access rules (roles, chunk flags, search filter)
+├── chat_history.py         # Saved conversations: ownership checks, history window, storage
 ├── auth.py                 # Password hashing & JWT helpers
 ├── database.py              # SQLAlchemy engine/session setup
 ├── dependencies.py          # get_current_user / require_role guards
@@ -82,7 +84,8 @@ RAG_RBAC_Project/
 ├── vector_store.py          # Shared embedding model + Chroma connection
 ├── models.py                # User & QueryLog ORM models
 └── routes/
-    └── auth_routes.py       # /auth/register, /auth/login
+    ├── auth_routes.py       # /auth/register, /auth/login, /auth/me
+    └── conversation_routes.py  # /conversations (list, open, delete)
 
 Frontend/
 ├── Dockerfile               # Multi-stage build (Node → Nginx)
@@ -97,6 +100,7 @@ Frontend/
         ├── ChatInput.jsx
         ├── Message.jsx
         ├── WelcomeScreen.jsx
+        ├── ChatsPanel.jsx      # Saved conversations
         ├── UserPanel.jsx       # Admin: role management
         └── LogsPanel.jsx       # Admin: monitoring dashboard
 ```
@@ -200,8 +204,11 @@ docker run -d -p 8001:8000 -v chroma_data:/data --name chroma chromadb/chroma:1.
 | POST | `/upload` | Manager, Admin | Upload & ingest a PDF with an `allowed_roles` audience (re-uploading replaces it) |
 | DELETE | `/delete/{filename}` | Admin | Delete a document and its vectors |
 | PATCH | `/documents/{filename}/access` | Admin | Change which roles can access a document |
-| POST | `/chat` | Authenticated | Ask a question (RAG + guardrails); returns the answer plus its cited `sources`, using only documents the caller may access |
+| POST | `/chat` | Authenticated | Ask a question (RAG + guardrails), optionally continuing a `conversation_id`; returns the answer plus its cited `sources`, using only documents the caller may access |
 | POST | `/chat/stream` | Authenticated | Same as `/chat`, streamed as Server-Sent Events (`token` events, then one `done` event with the sources) |
+| GET | `/conversations` | Authenticated | List the caller's saved conversations |
+| GET | `/conversations/{id}` | Owner | Messages of one conversation, with their sources |
+| DELETE | `/conversations/{id}` | Owner | Delete a conversation |
 | GET | `/admin/users` | Admin | List all users |
 | PATCH | `/admin/users/{id}/role` | Admin | Update a user's role |
 | GET | `/admin/logs` | Admin | Recent query logs |
@@ -211,6 +218,7 @@ docker run -d -p 8001:8000 -v chroma_data:/data --name chroma chromadb/chroma:1.
 
 - **Access control at retrieval, not at the prompt** — document permissions are enforced by a metadata filter in the vector search rather than by asking the LLM to withhold information. A manager also cannot upload a document their own role is locked out of, or overwrite an admins-only document by reusing its filename.
 - **Redaction-safe streaming** — tokens are buffered up to a whitespace whose preceding word contains no digit or `@`. No PII pattern can span such a point, so redacting the released pieces one by one gives exactly the same result as redacting the whole answer.
+- **Memory that respects permissions** — conversation history never enters the answer prompt. It is only used to turn a follow-up into a standalone question; a blocked or failed question is never saved, and a first question only creates a conversation once it has been answered.
 - **Strict context grounding** — the LLM prompt explicitly forbids using outside knowledge and returns a fixed fallback message when no relevant context is retrieved, reducing hallucination.
 - **Defense in depth** — guardrails run on both the input (length, prompt-injection regex checks) and the output (PII pattern redaction), independent of the LLM's own behavior.
 - **Self-role-change protection** — admins are blocked from changing their own role via the API to prevent accidental lockout.

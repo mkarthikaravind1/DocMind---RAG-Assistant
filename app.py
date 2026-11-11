@@ -13,6 +13,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from access import DEFAULT_ROLES, can_access, normalize_roles, roles_from_str, roles_to_str
+from chat_history import get_owned_conversation, recent_history, save_exchange
 from database import engine, Base, get_db, SessionLocal
 from dependencies import get_current_user, require_role
 from guardrails import validate_input
@@ -20,6 +21,7 @@ from ingest import ingest_pdf, delete_document_chunks, set_document_roles, Inges
 from models import User, QueryLog, Document
 from rag import get_answer, stream_answer
 from routes.auth_routes import router as auth_router
+from routes.conversation_routes import router as conversation_router
 
 # Create DB tables on startup
 Base.metadata.create_all(bind=engine)
@@ -47,6 +49,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Include auth routes
 app.include_router(auth_router, prefix="/auth")
+app.include_router(conversation_router, prefix="/conversations")
 
 
 def safe_pdf_name(filename: str) -> str:
@@ -252,6 +255,7 @@ def update_document_access(
 
 class ChatRequest(BaseModel):
     question: str
+    conversation_id: int | None = None   # omit to start a new conversation
 
 # ── Admin: list all users ──────────────────────────────────────────
 @app.get("/admin/users")
@@ -287,36 +291,54 @@ def update_role(
     return {"message": f"{user.email} is now {body.role}"}
 
 # ── Chat ───────────────────────────────────────────────────────────
+def _log_query(db: Session, email: str, role: str, question: str, *,
+               answer_length=0, response_time=0.0, chunks=0, guardrail_hit=None) -> None:
+    db.add(QueryLog(
+        user_email=email, user_role=role, question=question[:500],
+        answer_length=answer_length, response_time=response_time,
+        chunks_retrieved=chunks,
+        guardrail_hit=guardrail_hit[:100] if guardrail_hit else None,
+        timestamp=datetime.now(timezone.utc),
+    ))
+    db.commit()
+
+
+def _prepare_chat(request: ChatRequest, current_user: User, db: Session):
+    """
+    Shared start of /chat and /chat/stream: guardrails, then conversation memory.
+    Returns (question, email, role, user_id, conversation_id, history).
+    """
+    question = request.question.strip()
+    email    = str(current_user.email)
+    role     = str(current_user.role)
+    user_id  = int(current_user.id)  # type: ignore[arg-type]
+
+    error = validate_input(question)
+    if error:
+        _log_query(db, email, role, question, guardrail_hit=error)   # log the violation
+        raise HTTPException(status_code=400, detail=error)
+
+    history = []
+    if request.conversation_id is not None:
+        # 404 unless the conversation belongs to this user
+        conv = get_owned_conversation(db, user_id, request.conversation_id)
+        history = recent_history(db, int(conv.id))  # type: ignore[arg-type]
+
+    return question, email, role, user_id, request.conversation_id, history
+
+
 @app.post("/chat")
 def chat(
     request: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    question = request.question.strip()
-
-    # ── Guardrail check ───────────────────────────────────────────
-    error = validate_input(question)
-    if error:
-        # Log the guardrail violation
-        log = QueryLog(
-            user_email       = str(current_user.email),
-            user_role        = str(current_user.role),
-            question         = question[:500],
-            answer_length    = 0,
-            response_time    = 0.0,
-            chunks_retrieved = 0,
-            guardrail_hit    = error[:100],
-            timestamp        = datetime.now(timezone.utc),
-        )
-        db.add(log)
-        db.commit()
-        raise HTTPException(status_code=400, detail=error)
+    question, email, role, user_id, conversation_id, history = _prepare_chat(request, current_user, db)
 
     # ── RAG call with timing ──────────────────────────────────────
     start = time.time()
     try:
-        result = get_answer(question, str(current_user.role))
+        result = get_answer(question, role, history)
     except Exception as e:
         print(f"[CHAT] RAG pipeline failed: {e}")
         raise HTTPException(
@@ -325,27 +347,17 @@ def chat(
         )
     elapsed = round(time.time() - start, 3)
 
-    answer           = result["answer"]
-    chunks_retrieved = result["chunks_retrieved"]
-
-    # ── Log to DB ─────────────────────────────────────────────────
-    log = QueryLog(
-        user_email       = str(current_user.email),
-        user_role        = str(current_user.role),
-        question         = question[:500],
-        answer_length    = len(answer),
-        response_time    = elapsed,
-        chunks_retrieved = chunks_retrieved,
-        guardrail_hit    = None,
-        timestamp        = datetime.now(timezone.utc),
+    conversation_id = save_exchange(
+        db, user_id, conversation_id, question, result["answer"], result["sources"]
     )
-    db.add(log)
-    db.commit()
+    _log_query(db, email, role, question, answer_length=len(result["answer"]),
+               response_time=elapsed, chunks=result["chunks_retrieved"])
 
     return {
-        "answer":  answer,
-        "sources": result.get("sources", []),   # [{id, filename, page, snippet}]
-        "user":    current_user.email,
+        "answer":          result["answer"],
+        "sources":         result["sources"],   # [{id, filename, page, snippet}]
+        "conversation_id": conversation_id,
+        "user":            email,
     }
 
 
@@ -364,59 +376,43 @@ def chat_stream(
     """
     Same as /chat, but the answer arrives piece by piece as Server-Sent Events:
       event: token  data: {"text": "..."}             (many)
-      event: done   data: {"answer": "...", "sources": [...]}   (once, at the end)
+      event: done   data: {"answer", "sources", "conversation_id"}   (once, at the end)
       event: error  data: {"detail": "..."}           (instead of done, on failure)
     Guardrail blocks are returned as a normal 400 JSON error before any stream starts.
     """
-    question = request.question.strip()
-    email    = str(current_user.email)
-    role     = str(current_user.role)
-
-    error = validate_input(question)
-    if error:
-        db.add(QueryLog(
-            user_email=email, user_role=role, question=question[:500],
-            answer_length=0, response_time=0.0, chunks_retrieved=0,
-            guardrail_hit=error[:100], timestamp=datetime.now(timezone.utc),
-        ))
-        db.commit()
-        raise HTTPException(status_code=400, detail=error)
+    question, email, role, user_id, conversation_id, history = _prepare_chat(request, current_user, db)
 
     def event_stream():
-        start  = time.time()
-        result = None
+        start = time.time()
+        # The request's own DB session is already closed by the time the stream
+        # finishes, so saving and logging use a session of their own.
+        own_db = SessionLocal()
         try:
-            for kind, payload in stream_answer(question, role):
+            for kind, payload in stream_answer(question, role, history):
                 if kind == "token":
                     yield _sse("token", {"text": payload})
-                else:
-                    result = payload
-                    yield _sse("done", {
-                        "answer":  result["answer"],
-                        "sources": result["sources"],
-                        "user":    email,
-                    })
+                    continue
+
+                result = payload
+                saved_id = save_exchange(
+                    own_db, user_id, conversation_id, question, result["answer"], result["sources"]
+                )
+                _log_query(own_db, email, role, question, answer_length=len(result["answer"]),
+                           response_time=round(time.time() - start, 3),
+                           chunks=result["chunks_retrieved"])
+                yield _sse("done", {
+                    "answer":          result["answer"],
+                    "sources":         result["sources"],
+                    "conversation_id": saved_id,
+                    "user":            email,
+                })
         except Exception as e:
             print(f"[CHAT] Streaming RAG pipeline failed: {e}")
             yield _sse("error", {
                 "detail": "The answer service is unavailable right now. Please try again in a moment.",
             })
         finally:
-            # The request's own DB session is already closed by the time the
-            # stream finishes, so the log entry uses a session of its own.
-            if result is not None:
-                log_db = SessionLocal()
-                try:
-                    log_db.add(QueryLog(
-                        user_email=email, user_role=role, question=question[:500],
-                        answer_length=len(result["answer"]),
-                        response_time=round(time.time() - start, 3),
-                        chunks_retrieved=result["chunks_retrieved"],
-                        guardrail_hit=None, timestamp=datetime.now(timezone.utc),
-                    ))
-                    log_db.commit()
-                finally:
-                    log_db.close()
+            own_db.close()
 
     return StreamingResponse(
         event_stream(),

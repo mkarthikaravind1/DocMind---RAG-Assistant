@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text
 from database import Base
 from datetime import datetime, timezone
 
@@ -25,6 +25,25 @@ class Document(Base):
     uploaded_by   = Column(String(100))
     chunks        = Column(Integer)
     uploaded_at   = Column(DateTime, default=utcnow)   # stored as UTC
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(Integer, index=True)       # owner; conversations are private
+    title      = Column(String(120))
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow)
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, index=True)
+    role            = Column(String(10))           # "user" or "ai"
+    content         = Column(Text)
+    sources         = Column(Text)                 # JSON list of cited sources (ai messages)
+    created_at      = Column(DateTime, default=utcnow)
 
 class QueryLog(Base):
     __tablename__ = "query_logs"

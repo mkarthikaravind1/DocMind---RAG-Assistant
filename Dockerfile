@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir --default-timeout=120 --retries 10 \
 RUN pip install --no-cache-dir --default-timeout=120 --retries 10 -r requirements.txt
 
 # Copy all backend files from root
-COPY app.py access.py auth.py database.py dependencies.py \
+COPY app.py access.py auth.py chat_history.py database.py dependencies.py \
     guardrails.py ingest.py models.py rag.py vector_store.py ./
 
 # Copy routes folder

@@ -40,15 +40,32 @@ export default function App() {
   // Restored from localStorage so a page refresh does not log the user out
   const [token, setToken] = useState(() => stored('token'));
   const [role, setRole] = useState(() => stored('role'));
+  // Conversation memory: the chat being continued (null = a new chat) and the saved list
+  const [conversationId, setConversationId] = useState(() => {
+    const id = Number(stored('conversationId'));
+    return Number.isInteger(id) && id > 0 ? id : null;
+  });
+  const [conversations, setConversations] = useState([]);
+
+  const rememberConversation = (id) => {
+    setConversationId(id);
+    try {
+      if (id) localStorage.setItem('conversationId', String(id));
+      else localStorage.removeItem('conversationId');
+    } catch { /* ignore */ }
+  };
 
   const handleLogout = useCallback(() => {
     abortRef.current?.abort();   // stop any answer still streaming
     try {
       localStorage.removeItem('token');
       localStorage.removeItem('role');
+      localStorage.removeItem('conversationId');
     } catch { /* ignore */ }
     setToken(null);
     setRole(null);
+    setConversationId(null);
+    setConversations([]);
     setMessages([]);
     setDocs([]);
     setInputValue('');
@@ -106,6 +123,70 @@ export default function App() {
     return () => clearInterval(interval); // cleanup on logout
   }, [token, handleLogout]);
 
+  // ── Saved conversations ─────────────────────────────────────────
+  const fetchConversations = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API}/conversations`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data)) setConversations(data);
+    } catch { /* the status indicator already shows when the backend is down */ }
+  }, [token]);
+
+  const loadConversation = useCallback(async (id) => {
+    if (!token || !id) return;
+    abortRef.current?.abort();   // stop an answer that is still streaming into another chat
+    try {
+      const res = await fetch(`${API}/conversations/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.status === 401) { handleLogout(); return; }
+      if (!res.ok) {
+        // Deleted, or belongs to another account: fall back to a new chat
+        setConversationId(null);
+        try { localStorage.removeItem('conversationId'); } catch { /* ignore */ }
+        setMessages([]);
+        return;
+      }
+      const data = await res.json();
+      setMessages((data.messages || []).map(m => ({
+        role: m.role === 'user' ? 'user' : 'ai',
+        text: m.text,
+        sources: Array.isArray(m.sources) ? m.sources : [],
+      })));
+      setConversationId(id);
+      try { localStorage.setItem('conversationId', String(id)); } catch { /* ignore */ }
+    } catch { /* keep the current view */ }
+  }, [token, handleLogout]);
+
+  const handleNewChat = () => {
+    abortRef.current?.abort();
+    setMessages([]);
+    setInputValue('');
+    rememberConversation(null);
+  };
+
+  const handleDeleteConversation = async (id, title) => {
+    if (!window.confirm(`Delete the chat "${title || 'Untitled chat'}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`${API}/conversations/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok || res.status === 404) {
+        setConversations(prev => prev.filter(c => c.id !== id));
+        if (id === conversationId) handleNewChat();
+      }
+    } catch { /* leave the list as it is */ }
+  };
+
+  // After login (or a page refresh): load the chat list and reopen the last chat
+  useEffect(() => {
+    if (!token) return;
+    fetchConversations();
+    const lastId = Number(stored('conversationId'));
+    if (Number.isInteger(lastId) && lastId > 0) loadConversation(lastId);
+  }, [token, fetchConversations, loadConversation]);
+
   const handleLogin = (token, role) => {
     try {
       localStorage.setItem('token', token);
@@ -152,7 +233,8 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ question }),
+        // conversation_id lets the server use earlier turns to understand follow-ups
+        body: JSON.stringify(conversationId ? { question, conversation_id: conversationId } : { question }),
         signal: controller.signal,
       });
 
@@ -196,6 +278,11 @@ export default function App() {
               sources: Array.isArray(frame.data.sources) ? frame.data.sources : [],
               streaming: false,
             });
+            // The exchange is now saved: keep continuing this conversation
+            if (frame.data.conversation_id) {
+              rememberConversation(frame.data.conversation_id);
+              fetchConversations();
+            }
           } else if (frame.event === 'error') {
             finished = true;
             showAnswer({
@@ -270,6 +357,11 @@ export default function App() {
         onDeleteSuccess={(filename) => handleDocChange({ filename }, 'delete')}
         token={token}
         role={role}
+        conversations={conversations}
+        activeConversationId={conversationId}
+        onSelectConversation={loadConversation}
+        onNewChat={handleNewChat}
+        onDeleteConversation={handleDeleteConversation}
       />
 
       {/* Main panel */}
@@ -342,6 +434,28 @@ export default function App() {
             <i className="ti ti-shield-check" />
             {role}
           </div>
+
+          <button
+            onClick={handleNewChat}
+            title="Start a new chat"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '12px',
+              padding: '5px 10px',
+              borderRadius: '20px',
+              background: 'transparent',
+              border: '1px solid var(--border2)',
+              color: 'var(--text2)',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-body)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <i className="ti ti-plus" />
+            New chat
+          </button>
 
           <button
             onClick={handleLogout}

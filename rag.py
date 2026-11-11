@@ -8,9 +8,11 @@ from langchain_groq import ChatGroq
 from access import role_filter
 from guardrails import (
     FALLBACK_ANSWER,
+    MAX_INPUT_LENGTH,
     StreamingRedactor,
     build_strict_prompt,
     check_pii_in_response,
+    check_prompt_injection,
 )
 from vector_store import get_vectorstore
 
@@ -63,6 +65,49 @@ def _build_context(docs) -> str:
     return "\n\n".join(blocks)
 
 
+def condense_question(question: str, history) -> str:
+    """
+    Conversation memory: rewrite a follow-up ("from when does it start?") into
+    a question that makes sense on its own, using the recent turns.
+
+    History is used ONLY here. The answer itself is still built from freshly
+    retrieved, access-filtered excerpts, so memory can never re-serve text from
+    a document the user has since lost access to.
+    """
+    if not history:
+        return question
+
+    transcript = "\n".join(
+        f"{'User' if role == 'user' else 'Assistant'}: {content[:500]}"
+        for role, content in history
+    )
+    prompt = f"""Rewrite the follow-up question so it can be understood without the conversation.
+
+Rules:
+- Replace words like "it", "that", "they", "there" with what they refer to.
+- If the follow-up is already clear on its own, return it unchanged.
+- Do NOT answer the question. Do NOT add facts or numbers from the conversation.
+- Output only the rewritten question on one line, nothing else.
+
+Conversation:
+{transcript}
+
+Follow-up question: {question}
+
+Standalone question:"""
+
+    try:
+        rewritten = str(llm.invoke(prompt).content).strip().strip('"').strip()
+    except Exception as e:
+        print(f"[MEMORY] Could not rewrite follow-up, using it as asked: {e}")
+        return question
+
+    # Anything odd (empty, huge, or looking like an injection) falls back to the original
+    if not rewritten or len(rewritten) > MAX_INPUT_LENGTH or check_prompt_injection(rewritten):
+        return question
+    return " ".join(rewritten.split())
+
+
 def _retrieve(question: str, user_role: str) -> list:
     """Chunks this role may read that best match the question."""
     db = get_vectorstore()
@@ -113,8 +158,9 @@ def _finalize(cleaned_answer: str, retrieved_docs: list) -> dict:
 NO_CONTEXT_RESULT = {"answer": FALLBACK_ANSWER, "sources": [], "chunks_retrieved": 0}
 
 
-def get_answer(question: str, user_role: str) -> dict:
+def get_answer(question: str, user_role: str, history=None) -> dict:
     """Returns answer + cited sources + metadata for monitoring."""
+    question = condense_question(question, history)
     retrieved_docs = _retrieve(question, user_role)
     if not retrieved_docs:
         return dict(NO_CONTEXT_RESULT)
@@ -129,7 +175,7 @@ def get_answer(question: str, user_role: str) -> dict:
     return _finalize(cleaned_answer, retrieved_docs)
 
 
-def stream_answer(question: str, user_role: str):
+def stream_answer(question: str, user_role: str, history=None):
     """
     Generator version of get_answer for live streaming.
 
@@ -137,6 +183,7 @@ def stream_answer(question: str, user_role: str):
     then exactly one ("done", result) with the same dict get_answer returns.
     Everything yielded has already been through PII redaction.
     """
+    question = condense_question(question, history)
     retrieved_docs = _retrieve(question, user_role)
     if not retrieved_docs:
         yield "token", FALLBACK_ANSWER

@@ -2,6 +2,7 @@
 import React, { useRef, useState } from 'react';
 import UserPanel from './UserPanel';
 import LogsPanel from './LogsPanel';
+import ChatsPanel from './ChatsPanel';
 import { API, errorMessage } from '../config';
 
 const styles = {
@@ -130,7 +131,12 @@ const audienceColors = {
   admins:   { bg: 'var(--danger-dim)',  color: 'var(--danger)' },
 };
 
-export default function Sidebar({ docs, onUploadSuccess, onDeleteSuccess, onAccessChange, token , role}) {
+const TAB_ICONS = { docs: 'ti-files', chats: 'ti-messages', users: 'ti-users', logs: 'ti-chart-bar' };
+
+export default function Sidebar({
+  docs, onUploadSuccess, onDeleteSuccess, onAccessChange, token, role,
+  conversations = [], activeConversationId, onSelectConversation, onNewChat, onDeleteConversation,
+}) {
   const fileRef = useRef(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [status, setStatus] = useState(null); // { type: 'loading'|'success'|'error', msg }
@@ -141,8 +147,10 @@ export default function Sidebar({ docs, onUploadSuccess, onDeleteSuccess, onAcce
   // A manager cannot publish a document their own role would be locked out of
   const audienceOptions = AUDIENCES.filter(a => role === 'admin' || a.roles.includes(role));
   const [selectedTab, setActiveTab] = useState('docs');
+  // Everyone gets Docs and Chats; Users and Logs are admin-only
+  const tabs = role === 'admin' ? ['docs', 'chats', 'users', 'logs'] : ['docs', 'chats'];
   // If an admin is demoted while on the Users/Logs tab, fall back to Docs
-  const activeTab = role === 'admin' ? selectedTab : 'docs';
+  const activeTab = tabs.includes(selectedTab) ? selectedTab : 'docs';
 
   const handleFile = (f) => {
     if (!f) return;
@@ -252,22 +260,22 @@ export default function Sidebar({ docs, onUploadSuccess, onDeleteSuccess, onAcce
         </div>
       </div>
 
-      {/* In Sidebar.jsx — update the tab bar section (admin only)*/}
-      {role === 'admin' && (
+      {/* Tab bar */}
+      {(
         <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-          {['docs', 'users', 'logs'].map(tab => (
+          {tabs.map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
               style={{
-                flex: 1, padding: '10px', background: 'none', border: 'none',
+                flex: 1, padding: '10px 4px', background: 'none', border: 'none', whiteSpace: 'nowrap',
                 borderBottom: activeTab === tab ? '2px solid var(--accent)' : '2px solid transparent',
                 color: activeTab === tab ? 'var(--accent)' : 'var(--text3)',
                 fontSize: '11px', fontWeight: 600, cursor: 'pointer',
                 textTransform: 'capitalize', transition: 'all 0.15s',
               }}
             >
-              <i className={`ti ${tab === 'docs' ? 'ti-files' : tab === 'users' ? 'ti-users' : 'ti-chart-bar'}`}
+              <i className={`ti ${TAB_ICONS[tab]}`}
                 style={{ marginRight: '4px' }} />
               {tab}
             </button>
@@ -493,7 +501,15 @@ export default function Sidebar({ docs, onUploadSuccess, onDeleteSuccess, onAcce
           })
         )}
         </div>
-      </>) : activeTab === 'users'? (
+      </>) : activeTab === 'chats' ? (
+          <ChatsPanel
+            conversations={conversations}
+            activeId={activeConversationId}
+            onSelect={onSelectConversation}
+            onNew={onNewChat}
+            onDelete={onDeleteConversation}
+          />
+      ) : activeTab === 'users'? (
           <UserPanel token={token} />
       ):(
           <LogsPanel token={token} />
