@@ -7,6 +7,22 @@ import ChatInput from './components/ChatInput';
 import AuthScreen from './components/AuthScreen';
 import { API, errorMessage } from './config';
 
+// Parses one Server-Sent Events frame ("event: x\ndata: {...}") into { event, data }
+function parseSSE(frame) {
+  let event = 'message';
+  const dataLines = [];
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+  }
+  if (dataLines.length === 0) return null;
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) };
+  } catch {
+    return null;
+  }
+}
+
 // localStorage can throw in private windows, so every access is guarded
 const stored = (key) => {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -16,7 +32,9 @@ export default function App() {
   const [docs, setDocs] = useState([]);
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);            // a request is in flight
+  const [awaitingFirstToken, setAwaitingFirstToken] = useState(false); // ...and nothing has arrived yet
+  const abortRef = useRef(null);                              // cancels an in-flight answer
   const [backendOnline, setBackendOnline] = useState(null); // null=checking
   const messagesEndRef = useRef(null);
   // Restored from localStorage so a page refresh does not log the user out
@@ -24,6 +42,7 @@ export default function App() {
   const [role, setRole] = useState(() => stored('role'));
 
   const handleLogout = useCallback(() => {
+    abortRef.current?.abort();   // stop any answer still streaming
     try {
       localStorage.removeItem('token');
       localStorage.removeItem('role');
@@ -103,15 +122,38 @@ export default function App() {
     setMessages(prev => [...prev, { role: 'user', text: question }]);
     setInputValue('');
     setIsTyping(true);
+    setAwaitingFirstToken(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    // The answer bubble is created when the first piece arrives, then updated in place
+    let started = false;
+    let text = '';
+    const showAnswer = (patch) => {
+      setAwaitingFirstToken(false);
+      if (!started) {
+        started = true;
+        setMessages(prev => [...prev, { role: 'ai', text: '', sources: [], ...patch }]);
+      } else {
+        setMessages(prev => {
+          if (prev.length === 0) return prev;   // chat was cleared (logout) mid-stream
+          const next = prev.slice();
+          next[next.length - 1] = { ...next[next.length - 1], ...patch };
+          return next;
+        });
+      }
+    };
 
     try {
-      const res = await fetch(`${API}/chat`, {
+      const res = await fetch(`${API}/chat/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ question }),
+        signal: controller.signal,
       });
 
       if (res.status === 401) {
@@ -119,25 +161,68 @@ export default function App() {
         return;
       }
 
-      const data = await res.json().catch(() => ({}));
+      // Guardrail blocks (400) and other errors arrive as normal JSON, not as a stream
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        showAnswer({ text: `⚠️ ${errorMessage(data, 'Something went wrong. Please try again.')}` });
+        return;
+      }
 
-      setMessages(prev => [...prev, {
-        role: 'ai',
-        // Guardrail blocks (400) and server errors carry their reason in `detail`
-        text: res.ok
-          ? (data.answer || 'No answer was returned.')
-          : `⚠️ ${errorMessage(data, 'Something went wrong. Please try again.')}`,
-        // [{ id, filename, page, snippet }] - the excerpts the answer cites
-        sources: res.ok && Array.isArray(data.sources) ? data.sources : [],
-      }]);
+      // Read the Server-Sent Events stream: frames are separated by a blank line
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finished = false;
 
-    } catch {
-      setMessages(prev => [...prev, {
-        role: 'ai',
-        text: '⚠️ Could not reach the backend. Make sure FastAPI is running:\n\nuvicorn app:app --reload',
-      }]);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let sep;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+          const frame = parseSSE(buffer.slice(0, sep));
+          buffer = buffer.slice(sep + 2);
+          if (!frame) continue;
+
+          if (frame.event === 'token') {
+            text += frame.data.text || '';
+            showAnswer({ text, streaming: true });
+          } else if (frame.event === 'done') {
+            finished = true;
+            // The final answer replaces the streamed text and brings the cited sources
+            showAnswer({
+              text: frame.data.answer || text || 'No answer was returned.',
+              sources: Array.isArray(frame.data.sources) ? frame.data.sources : [],
+              streaming: false,
+            });
+          } else if (frame.event === 'error') {
+            finished = true;
+            showAnswer({
+              text: `${text ? text + '\n\n' : ''}⚠️ ${errorMessage(frame.data, 'Something went wrong. Please try again.')}`,
+              streaming: false,
+            });
+          }
+        }
+      }
+
+      if (!finished) {
+        showAnswer({
+          text: `${text ? text + '\n\n' : ''}⚠️ The connection was interrupted before the answer finished.`,
+          streaming: false,
+        });
+      }
+
+    } catch (err) {
+      if (controller.signal.aborted) return;   // user logged out mid-answer
+      showAnswer({
+        text: `${text ? text + '\n\n' : ''}⚠️ Could not reach the backend. Make sure FastAPI is running:\n\nuvicorn app:app --reload`,
+        streaming: false,
+      });
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setIsTyping(false);
+      setAwaitingFirstToken(false);
     }
   };
 
@@ -294,9 +379,9 @@ export default function App() {
           ) : (
             <>
               {messages.map((msg, i) => (
-                <Message key={i} role={msg.role} text={msg.text} sources={msg.sources} />
+                <Message key={i} role={msg.role} text={msg.text} sources={msg.sources} streaming={msg.streaming} />
               ))}
-              {isTyping && <TypingBubble />}
+              {isTyping && awaitingFirstToken && <TypingBubble />}
               <div ref={messagesEndRef} />
             </>
           )}

@@ -1,4 +1,5 @@
 #app.py
+import json
 import os
 import shutil
 import time
@@ -6,17 +7,18 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from access import DEFAULT_ROLES, can_access, normalize_roles, roles_from_str, roles_to_str
-from database import engine, Base, get_db
+from database import engine, Base, get_db, SessionLocal
 from dependencies import get_current_user, require_role
 from guardrails import validate_input
 from ingest import ingest_pdf, delete_document_chunks, set_document_roles, IngestError
 from models import User, QueryLog, Document
-from rag import get_answer
+from rag import get_answer, stream_answer
 from routes.auth_routes import router as auth_router
 
 # Create DB tables on startup
@@ -345,6 +347,82 @@ def chat(
         "sources": result.get("sources", []),   # [{id, filename, page, snippet}]
         "user":    current_user.email,
     }
+
+
+def _sse(event: str, data: dict) -> str:
+    """One Server-Sent Event frame."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+# ── Chat (streaming) ───────────────────────────────────────────────
+@app.post("/chat/stream")
+def chat_stream(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Same as /chat, but the answer arrives piece by piece as Server-Sent Events:
+      event: token  data: {"text": "..."}             (many)
+      event: done   data: {"answer": "...", "sources": [...]}   (once, at the end)
+      event: error  data: {"detail": "..."}           (instead of done, on failure)
+    Guardrail blocks are returned as a normal 400 JSON error before any stream starts.
+    """
+    question = request.question.strip()
+    email    = str(current_user.email)
+    role     = str(current_user.role)
+
+    error = validate_input(question)
+    if error:
+        db.add(QueryLog(
+            user_email=email, user_role=role, question=question[:500],
+            answer_length=0, response_time=0.0, chunks_retrieved=0,
+            guardrail_hit=error[:100], timestamp=datetime.now(timezone.utc),
+        ))
+        db.commit()
+        raise HTTPException(status_code=400, detail=error)
+
+    def event_stream():
+        start  = time.time()
+        result = None
+        try:
+            for kind, payload in stream_answer(question, role):
+                if kind == "token":
+                    yield _sse("token", {"text": payload})
+                else:
+                    result = payload
+                    yield _sse("done", {
+                        "answer":  result["answer"],
+                        "sources": result["sources"],
+                        "user":    email,
+                    })
+        except Exception as e:
+            print(f"[CHAT] Streaming RAG pipeline failed: {e}")
+            yield _sse("error", {
+                "detail": "The answer service is unavailable right now. Please try again in a moment.",
+            })
+        finally:
+            # The request's own DB session is already closed by the time the
+            # stream finishes, so the log entry uses a session of its own.
+            if result is not None:
+                log_db = SessionLocal()
+                try:
+                    log_db.add(QueryLog(
+                        user_email=email, user_role=role, question=question[:500],
+                        answer_length=len(result["answer"]),
+                        response_time=round(time.time() - start, 3),
+                        chunks_retrieved=result["chunks_retrieved"],
+                        guardrail_hit=None, timestamp=datetime.now(timezone.utc),
+                    ))
+                    log_db.commit()
+                finally:
+                    log_db.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _utc_iso(ts):

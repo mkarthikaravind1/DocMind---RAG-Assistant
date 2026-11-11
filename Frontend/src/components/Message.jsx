@@ -174,7 +174,7 @@ function Sources({ sources, openId, onToggle }) {
   );
 }
 
-export default function Message({ role, text, sources = [] }) {
+export default function Message({ role, text, sources = [], streaming = false }) {
   const isUser = role === 'user';
   const [openId, setOpenId] = useState(null);   // which source excerpt is expanded
   const toggle = (id) => setOpenId(prev => (prev === id ? null : id));
@@ -226,6 +226,19 @@ export default function Message({ role, text, sources = [] }) {
         wordBreak: 'break-word',
       }}>
         {isUser ? text : renderText(text, sourceIds, openId, toggle)}
+        {streaming && (
+          // Blinking caret while the answer is still being written
+          <span style={{
+            display: 'inline-block',
+            width: '7px',
+            height: '15px',
+            marginLeft: '2px',
+            verticalAlign: 'text-bottom',
+            borderRadius: '1px',
+            background: 'var(--accent)',
+            animation: 'blink 1s steps(2, start) infinite',
+          }} />
+        )}
         {hasSources && <Sources sources={sources} openId={openId} onToggle={toggle} />}
       </div>
     </div>

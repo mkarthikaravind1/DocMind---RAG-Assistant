@@ -80,6 +80,59 @@ def check_pii_in_response(text: str):
 
     return cleaned, found
 
+class StreamingRedactor:
+    """
+    PII redaction for a token stream.
+
+    Redacting each token on its own would leak: "4111 1111 1111 1111" arrives
+    as several tokens, and none of them looks like a card number by itself.
+    So text is buffered and only released up to a *safe cut*: a whitespace
+    character whose preceding word contains no digit and no "@". Every PII
+    pattern is made of digit groups or is a single email/PAN word, so no match
+    can ever span such a cut. Redacting the released pieces separately therefore
+    gives exactly the same result as redacting the whole answer at once.
+    """
+
+    def __init__(self):
+        self._pending = ""
+        self.found: list[str] = []
+
+    def _redact(self, text: str) -> str:
+        cleaned, found = check_pii_in_response(text)
+        for label in found:
+            if label not in self.found:
+                self.found.append(label)
+        return cleaned
+
+    @staticmethod
+    def _safe_cut(text: str) -> int:
+        """Index just past the last safe whitespace, or 0 if there is none yet."""
+        i = len(text) - 1
+        while i >= 0:
+            if text[i].isspace():
+                j = i
+                while j > 0 and not text[j - 1].isspace():
+                    j -= 1
+                word = text[j:i]
+                if not any(ch.isdigit() or ch == "@" for ch in word):
+                    return i + 1
+            i -= 1
+        return 0
+
+    def feed(self, text: str) -> str:
+        """Add new text; returns the part that is now safe to send (may be empty)."""
+        self._pending += text
+        cut = self._safe_cut(self._pending)
+        if cut == 0:
+            return ""
+        ready, self._pending = self._pending[:cut], self._pending[cut:]
+        return self._redact(ready)
+
+    def flush(self) -> str:
+        """Call once at the end of the stream to release whatever is left."""
+        rest, self._pending = self._pending, ""
+        return self._redact(rest) if rest else ""
+
 # ── Guardrail 4 — Answer only from context ─────────────────────────
 
 def build_strict_prompt(context: str, question: str) -> str:

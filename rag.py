@@ -6,7 +6,12 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 
 from access import role_filter
-from guardrails import FALLBACK_ANSWER, build_strict_prompt, check_pii_in_response
+from guardrails import (
+    FALLBACK_ANSWER,
+    StreamingRedactor,
+    build_strict_prompt,
+    check_pii_in_response,
+)
 from vector_store import get_vectorstore
 
 load_dotenv()
@@ -58,8 +63,8 @@ def _build_context(docs) -> str:
     return "\n\n".join(blocks)
 
 
-def get_answer(question: str, user_role: str) -> dict:
-    """Returns answer + cited sources + metadata for monitoring."""
+def _retrieve(question: str, user_role: str) -> list:
+    """Chunks this role may read that best match the question."""
     db = get_vectorstore()
 
     # Document-level RBAC: the search itself only sees chunks this role is
@@ -75,27 +80,13 @@ def get_answer(question: str, user_role: str) -> dict:
     # an unrelated question), so in that case pass the top chunks through and
     # let the strict prompt decide whether the context answers the question.
     strong_docs = [doc for doc, distance in scored_docs if distance <= MAX_DISTANCE]
-    retrieved_docs = strong_docs or [doc for doc, _ in scored_docs]
-    chunks_retrieved = len(retrieved_docs)
+    return strong_docs or [doc for doc, _ in scored_docs]
 
-    if not retrieved_docs:
-        return {
-            "answer":           FALLBACK_ANSWER,
-            "sources":          [],
-            "chunks_retrieved": 0,
-        }
 
-    prompt = build_strict_prompt(_build_context(retrieved_docs), question)
+def _finalize(cleaned_answer: str, retrieved_docs: list) -> dict:
+    """Turn an already-redacted answer into the final answer + cited sources."""
+    cleaned_answer = cleaned_answer.strip()
 
-    response   = llm.invoke(prompt)
-    raw_answer = str(response.content).strip()
-
-    cleaned_answer, pii_found = check_pii_in_response(raw_answer)
-
-    if pii_found:
-        print(f"[GUARDRAIL] PII redacted: {pii_found}")
-
-    # ── Citations ─────────────────────────────────────────────────
     if FALLBACK_ANSWER in cleaned_answer:
         # Nothing was answered, so there is nothing to cite
         cleaned_answer, sources = FALLBACK_ANSWER, []
@@ -115,5 +106,62 @@ def get_answer(question: str, user_role: str) -> dict:
     return {
         "answer":           cleaned_answer,
         "sources":          sources,
-        "chunks_retrieved": chunks_retrieved,
+        "chunks_retrieved": len(retrieved_docs),
     }
+
+
+NO_CONTEXT_RESULT = {"answer": FALLBACK_ANSWER, "sources": [], "chunks_retrieved": 0}
+
+
+def get_answer(question: str, user_role: str) -> dict:
+    """Returns answer + cited sources + metadata for monitoring."""
+    retrieved_docs = _retrieve(question, user_role)
+    if not retrieved_docs:
+        return dict(NO_CONTEXT_RESULT)
+
+    prompt   = build_strict_prompt(_build_context(retrieved_docs), question)
+    response = llm.invoke(prompt)
+
+    cleaned_answer, pii_found = check_pii_in_response(str(response.content))
+    if pii_found:
+        print(f"[GUARDRAIL] PII redacted: {pii_found}")
+
+    return _finalize(cleaned_answer, retrieved_docs)
+
+
+def stream_answer(question: str, user_role: str):
+    """
+    Generator version of get_answer for live streaming.
+
+    Yields ("token", text) for each piece of the answer that is safe to show,
+    then exactly one ("done", result) with the same dict get_answer returns.
+    Everything yielded has already been through PII redaction.
+    """
+    retrieved_docs = _retrieve(question, user_role)
+    if not retrieved_docs:
+        yield "token", FALLBACK_ANSWER
+        yield "done", dict(NO_CONTEXT_RESULT)
+        return
+
+    prompt   = build_strict_prompt(_build_context(retrieved_docs), question)
+    redactor = StreamingRedactor()
+    parts    = []
+
+    for chunk in llm.stream(prompt):
+        piece = chunk.content if isinstance(chunk.content, str) else ""
+        if not piece:
+            continue
+        safe = redactor.feed(piece)
+        if safe:
+            parts.append(safe)
+            yield "token", safe
+
+    tail = redactor.flush()
+    if tail:
+        parts.append(tail)
+        yield "token", tail
+
+    if redactor.found:
+        print(f"[GUARDRAIL] PII redacted: {redactor.found}")
+
+    yield "done", _finalize("".join(parts), retrieved_docs)
