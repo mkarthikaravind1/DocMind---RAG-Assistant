@@ -1,7 +1,8 @@
-{/*Sidebar.jsx*/ }
+// Sidebar.jsx
 import React, { useRef, useState } from 'react';
 import UserPanel from './UserPanel';
 import LogsPanel from './LogsPanel';
+import { API, errorMessage } from '../config';
 
 const styles = {
   sidebar: {
@@ -116,11 +117,14 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
   const [status, setStatus] = useState(null); // { type: 'loading'|'success'|'error', msg }
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [activeTab, setActiveTab] = useState('docs'); 
+  const [selectedTab, setActiveTab] = useState('docs');
+  // If an admin is demoted while on the Users/Logs tab, fall back to Docs
+  const activeTab = role === 'admin' ? selectedTab : 'docs';
 
   const handleFile = (f) => {
     if (!f) return;
-    if (f.type !== 'application/pdf') {
+    // Some browsers/OSes report an empty type for PDFs, so also accept the extension
+    if (f.type !== 'application/pdf' && !f.name.toLowerCase().endsWith('.pdf')) {
       setStatus({ type: 'error', msg: 'Only PDF files are supported' });
       return;
     }
@@ -137,15 +141,15 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
     form.append('file', selectedFile);
 
     try {
-      const res = await fetch('http://localhost:8000/upload', { method: 'POST', headers: {Authorization: `Bearer ${token}` }, body: form });
-      const data = await res.json();
+      const res = await fetch(`${API}/upload`, { method: 'POST', headers: {Authorization: `Bearer ${token}` }, body: form });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setStatus({ type: 'success', msg: `"${data.filename}" ready` });
         onUploadSuccess(data.filename);
         setSelectedFile(null);
         if (fileRef.current) fileRef.current.value = '';
       } else {
-        setStatus({ type: 'error', msg: data.error || 'Upload failed' });
+        setStatus({ type: 'error', msg: errorMessage(data, 'Upload failed') });
       }
     } catch {
       setStatus({ type: 'error', msg: 'Cannot connect to backend' });
@@ -154,17 +158,22 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
   };
 
   const handleDelete = async (filename) => {
-  try {
-    const res = await fetch(`http://localhost:8000/delete/${filename}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.ok) { onDeleteSuccess(filename); setStatus(null); }
-    else setStatus({ type: 'error', msg: 'Delete failed' });
-  } catch {
-    setStatus({ type: 'error', msg: 'Delete failed' });
-  }
-};
+    if (!window.confirm(`Delete "${filename}"? Its content will no longer be used in answers.`)) return;
+    try {
+      // encodeURIComponent keeps names containing # ? % or spaces intact
+      const res = await fetch(`${API}/delete/${encodeURIComponent(filename)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) { onDeleteSuccess(filename); setStatus(null); }
+      else {
+        const data = await res.json().catch(() => ({}));
+        setStatus({ type: 'error', msg: errorMessage(data, 'Delete failed') });
+      }
+    } catch {
+      setStatus({ type: 'error', msg: 'Cannot connect to backend' });
+    }
+  };
 
   const statusColors = {
     loading: { bg: 'var(--accent-dim)', color: 'var(--accent-light)' },
@@ -339,6 +348,7 @@ export default function Sidebar({ docs, onUploadSuccess,onDeleteSuccess, token ,
               {role === 'admin' && (
                 <button
                   onClick={() => handleDelete(name)}
+                  title="Delete document"
                   style={{
                     background: 'none',
                     border: 'none',

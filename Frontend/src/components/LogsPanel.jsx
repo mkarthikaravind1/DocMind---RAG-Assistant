@@ -1,7 +1,7 @@
 // LogsPanel.jsx
 import React, { useEffect, useState } from 'react';
 
-const API = 'http://localhost:8000';
+import { API, errorMessage } from '../config';
 
 const roleColors = {
   admin:    { bg: 'var(--danger-dim)',  color: 'var(--danger)' },
@@ -13,29 +13,40 @@ export default function LogsPanel({ token }) {
   const [logs,  setLogs]  = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
-
-  const fetchAll = async () => {
-    try {
-      const [logsRes, statsRes] = await Promise.all([
-        fetch(`${API}/admin/logs`,       { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API}/admin/logs/stats`, { headers: { Authorization: `Bearer ${token}` } }),
-      ]);
-      const logsData  = await logsRes.json();
-      const statsData = await statsRes.json();
-      setLogs(logsData);
-      setStats(statsData);
-    } catch {
-      // silent
-    }
-    setLoading(false);
-  };
+  const [error, setError] = useState('');
 
   useEffect(() => {
+    let cancelled = false;
+
+    const fetchAll = async () => {
+      try {
+        const [logsRes, statsRes] = await Promise.all([
+          fetch(`${API}/admin/logs`,       { headers: { Authorization: `Bearer ${token}` } }),
+          fetch(`${API}/admin/logs/stats`, { headers: { Authorization: `Bearer ${token}` } }),
+        ]);
+        const logsData  = await logsRes.json().catch(() => ({}));
+        const statsData = await statsRes.json().catch(() => ({}));
+        if (cancelled) return;
+
+        // On 401/403 the body is { detail }, not a list: never pass that to .map()
+        if (!logsRes.ok || !statsRes.ok || !Array.isArray(logsData)) {
+          setError(errorMessage(logsRes.ok ? statsData : logsData, 'Failed to load logs'));
+        } else {
+          setLogs(logsData);
+          setStats(statsData);
+          setError('');
+        }
+      } catch {
+        if (!cancelled) setError('Cannot connect to backend');
+      }
+      if (!cancelled) setLoading(false);
+    };
+
     fetchAll();
     // Refresh every 10 seconds
     const interval = setInterval(fetchAll, 10000);
-    return () => clearInterval(interval);
-  }, []);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [token]);
 
   const statCards = stats ? [
     { label: 'Total Queries',       value: stats.total_queries,        icon: 'ti-message-dots' },
@@ -54,6 +65,16 @@ export default function LogsPanel({ token }) {
       }}>
         Monitoring Dashboard
       </div>
+
+      {error && (
+        <div style={{
+          fontSize: '12px', color: 'var(--danger)',
+          background: 'var(--danger-dim)', padding: '8px 10px',
+          borderRadius: '6px', marginBottom: '10px',
+        }}>
+          {error}
+        </div>
+      )}
 
       {/* Stat cards */}
       {stats && (
@@ -125,7 +146,7 @@ export default function LogsPanel({ token }) {
                 </span>
               )}
               <span style={{ fontSize: '10px', color: 'var(--text3)', marginLeft: 'auto' }}>
-                {new Date(log.timestamp).toLocaleString()}
+                {log.timestamp ? new Date(log.timestamp).toLocaleString() : ''}
               </span>
             </div>
 

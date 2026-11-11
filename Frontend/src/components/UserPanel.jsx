@@ -1,7 +1,7 @@
-{/* UserPanel.jsx*/ }
+// UserPanel.jsx
 import React, { useEffect, useState } from 'react';
 
-const API = 'http://localhost:8000';
+import { API, errorMessage } from '../config';
 const ROLES = ['employee', 'manager', 'admin'];
 
 const roleColors = {
@@ -16,21 +16,33 @@ export default function UserPanel({ token }) {
   const [updating, setUpdating] = useState(null); // user id being updated
   const [error, setError] = useState('');
 
-  const fetchUsers = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API}/admin/users`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      setUsers(data);
-    } catch {
-      setError('Failed to load users');
-    }
-    setLoading(false);
-  };
+  useEffect(() => {
+    let cancelled = false;
 
-  useEffect(() => { fetchUsers(); }, []);
+    const fetchUsers = async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(`${API}/admin/users`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+
+        // On 401/403 the body is { detail }, not a list: never pass that to .map()
+        if (!res.ok || !Array.isArray(data)) {
+          setError(errorMessage(data, 'Failed to load users'));
+        } else {
+          setUsers(data);
+        }
+      } catch {
+        if (!cancelled) setError('Failed to load users');
+      }
+      if (!cancelled) setLoading(false);
+    };
+
+    fetchUsers();
+    return () => { cancelled = true; };
+  }, [token]);
 
   const handleRoleChange = async (userId, newRole) => {
     setUpdating(userId);
@@ -44,9 +56,9 @@ export default function UserPanel({ token }) {
         },
         body: JSON.stringify({ role: newRole }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.detail || 'Update failed');
+        setError(errorMessage(data, 'Update failed'));
       } else {
         // Update local state instantly without refetch
         setUsers(prev =>

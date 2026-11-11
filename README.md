@@ -75,16 +75,18 @@ RAG_RBAC_Project/
 ├── guardrails.py            # Input/output guardrails
 ├── ingest.py                 # PDF chunking & vector store ingestion
 ├── rag.py                   # Retrieval + Groq LLM answer generation
+├── vector_store.py          # Shared embedding model + Chroma connection
 ├── models.py                # User & QueryLog ORM models
 └── routes/
     └── auth_routes.py       # /auth/register, /auth/login
 
-frontend/
+Frontend/
 ├── Dockerfile               # Multi-stage build (Node → Nginx)
 ├── nginx.conf
 ├── public/index.html
 └── src/
     ├── App.jsx               # Root app, state & API orchestration
+    ├── config.js             # Backend URL (REACT_APP_API_URL)
     └── components/
         ├── AuthScreen.jsx     # Login / Register
         ├── Sidebar.jsx        # Upload, docs list, admin tabs
@@ -109,21 +111,22 @@ frontend/
 
 1. Install dependencies:
    ```bash
-   pip install fastapi uvicorn sqlalchemy pymysql python-dotenv bcrypt "python-jose[cryptography]" \
-               langchain langchain-community langchain-text-splitters langchain-huggingface \
-               langchain-chroma chromadb langchain-groq
+   pip install -r requirements.txt
    ```
-2. Create a `.env` file in the backend root:
+2. Copy `.env.example` to `.env` in the project root and fill in your values:
    ```env
    SECRET_KEY=your-secret-key
    MYSQL_USER=root
    MYSQL_PASSWORD=yourpassword
+   MYSQL_ROOT_PASSWORD=yourpassword
    MYSQL_HOST=localhost
-   MYSQL_DB=docmind
+   MYSQL_PORT=3306
+   MYSQL_DB=rag_app
    CHROMA_HOST=localhost
    CHROMA_PORT=8001
    GROQ_API_KEY=your-groq-api-key
    ```
+   `SECRET_KEY` is generated once (`python -c "import secrets; print(secrets.token_hex(32))"`) and does not expire; only login tokens do, after 24 hours. The backend refuses to start without it.
 3. Start the API server:
    ```bash
    uvicorn app:app --reload
@@ -138,22 +141,26 @@ npm install
 npm start
 ```
 
-The app runs at `http://localhost:3000` and expects the backend at `http://localhost:8000` (configured via the `API` constant in each component).
+The app runs at `http://localhost:3000` and expects the backend at `http://localhost:8000`. To point it elsewhere, set `REACT_APP_API_URL` (read in `src/config.js`).
+
+### First Admin
+
+The **first account registered becomes the admin**. Every later account starts as `employee` and can be promoted from the admin's Users tab.
 
 ### Docker
 
-The frontend ships with a production Dockerfile (Node build → Nginx serve):
+Run the whole stack (MySQL, ChromaDB, backend, frontend) with one command:
 
 ```bash
-cd Frontend
-docker build -t docmind-frontend .
-docker run -p 3000:80 docmind-frontend
+docker compose up --build
 ```
 
-ChromaDB should be run as its own container so the backend can connect via `chromadb.HttpClient`:
+Compose sets the MySQL and ChromaDB hostnames for the backend container itself, so the same `.env` works for both Docker and local runs.
+
+To run only ChromaDB in Docker while the backend runs locally with `uvicorn`:
 
 ```bash
-docker run -d -p 8001:8000 --name chroma chromadb/chroma
+docker run -d -p 8001:8000 -v chroma_data:/data --name chroma chromadb/chroma:1.5.9
 ```
 ---
 ## Screenshots
@@ -183,9 +190,10 @@ docker run -d -p 8001:8000 --name chroma chromadb/chroma
 |---|---|---|---|
 | POST | `/auth/register` | Public | Register a new user (default role: `employee`) |
 | POST | `/auth/login` | Public | Authenticate and receive a JWT |
+| GET | `/auth/me` | Authenticated | Current user's profile and live role |
 | GET | `/files` | Authenticated | List indexed documents |
-| POST | `/upload` | Authenticated | Upload & ingest a PDF |
-| DELETE | `/delete/{filename}` | Admin | Delete an indexed document |
+| POST | `/upload` | Manager, Admin | Upload & ingest a PDF (re-uploading replaces it) |
+| DELETE | `/delete/{filename}` | Admin | Delete a document and its vectors |
 | POST | `/chat` | Authenticated | Ask a question (RAG + guardrails) |
 | GET | `/admin/users` | Admin | List all users |
 | PATCH | `/admin/users/{id}/role` | Admin | Update a user's role |
@@ -202,7 +210,6 @@ docker run -d -p 8001:8000 --name chroma chromadb/chroma
 ## Future Improvements
 
 
-- Move hardcoded API URLs to environment variables for multi-environment deployment.
 - Add automated tests for guardrails and RBAC permission boundaries.
 
 --- 

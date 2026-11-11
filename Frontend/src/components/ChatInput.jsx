@@ -1,8 +1,9 @@
-{/*ChatInput.jsx*/ }
-import React, { useRef, useEffect } from 'react';
+// ChatInput.jsx
+import React, { useRef, useEffect, useState } from 'react';
 
 export default function ChatInput({ value, onChange, onSend, disabled }) {
   const textareaRef = useRef(null);
+  const [focused, setFocused] = useState(false);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -32,24 +33,14 @@ export default function ChatInput({ value, onChange, onSend, disabled }) {
         alignItems: 'flex-end',
         gap: '10px',
         background: 'var(--surface2)',
-        border: `1px solid var(--border2)`,
+        border: `1px solid ${focused ? 'var(--accent)' : 'var(--border2)'}`,
+        boxShadow: focused ? '0 0 0 3px var(--accent-glow)' : 'none',
         borderRadius: 'var(--radius-lg)',
         padding: '10px 12px 10px 16px',
         transition: 'border-color var(--transition), box-shadow var(--transition)',
       }}
-        onFocus={() => {}}
-        ref={el => {
-          if (el) {
-            el.addEventListener('focusin', () => {
-              el.style.borderColor = 'var(--accent)';
-              el.style.boxShadow = '0 0 0 3px var(--accent-glow)';
-            });
-            el.addEventListener('focusout', () => {
-              el.style.borderColor = 'var(--border2)';
-              el.style.boxShadow = 'none';
-            });
-          }
-        }}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
       >
         <textarea
           ref={textareaRef}

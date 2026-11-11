@@ -1,4 +1,4 @@
-{/*WelcomeScreen.jsx*/ }
+// WelcomeScreen.jsx
 import React from 'react';
 
 const SUGGESTIONS = [

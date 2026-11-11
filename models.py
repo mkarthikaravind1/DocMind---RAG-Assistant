@@ -1,6 +1,11 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime
 from database import Base
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
 
 class User(Base):
     __tablename__ = "users"
@@ -21,4 +26,4 @@ class QueryLog(Base):
     response_time    = Column(Float)          # seconds
     chunks_retrieved = Column(Integer)        # k value used
     guardrail_hit    = Column(String(100))    # None or violation type
-    timestamp        = Column(DateTime, default=datetime.utcnow)
+    timestamp        = Column(DateTime, default=utcnow)   # stored as UTC

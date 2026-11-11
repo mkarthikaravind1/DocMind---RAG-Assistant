@@ -1,54 +1,44 @@
+import os
+
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from dotenv import load_dotenv
-import os
-import chromadb
-from chromadb.config import Settings
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VECTORSTORE_DIR = os.path.join(BASE_DIR, "vectorstore")
-DOCUMENTS_DIR   = os.path.join(BASE_DIR, "documents")
+from vector_store import get_vectorstore
 
-load_dotenv()
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+class IngestError(Exception):
+    """Raised when a PDF cannot be turned into searchable chunks."""
 
-def ingest_pdf(file_path: str):
+
+def delete_document_chunks(filename: str) -> None:
+    """Remove every stored chunk that belongs to the given file."""
+    db = get_vectorstore()
+    db.delete(where={"filename": filename})
+
+
+def ingest_pdf(file_path: str) -> int:
     """Load, chunk, embed, and store a PDF in the vectorstore."""
+    filename = os.path.basename(file_path)
+
     loader = PyPDFLoader(file_path)
     docs = loader.load()
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    chunks = splitter.split_documents(docs)
+    chunks = [c for c in splitter.split_documents(docs) if c.page_content.strip()]
 
-    client = get_chroma_client()
+    if not chunks:
+        raise IngestError(
+            "No readable text found in this PDF. Scanned/image-only PDFs are not supported."
+        )
 
-    # db = Chroma.from_documents(
-    #     chunks,
-    #     embeddings,
-    #     persist_directory=VECTORSTORE_DIR,
-    #     collection_name="rag_docs"
-    # )
-    db = Chroma(
-        client=client,
-        collection_name="rag_docs",
-        embedding_function=embeddings,
-    )
+    # Tag every chunk with its filename so it can be cited and deleted later
+    for chunk in chunks:
+        chunk.metadata["filename"] = filename
+
+    db = get_vectorstore()
+    # Re-uploading the same file replaces its chunks instead of duplicating them
+    db.delete(where={"filename": filename})
     db.add_documents(chunks)
-
 
     print(f"Stored {len(chunks)} chunks from {file_path}")
     return len(chunks)
-
-def get_chroma_client():
-    chroma_host = os.getenv("CHROMA_HOST", "localhost")
-    chroma_port = int(os.getenv("CHROMA_PORT", "8001"))
-    return chromadb.HttpClient(
-        host=chroma_host,
-        port=chroma_port,
-        settings=Settings(anonymized_telemetry=False)
-    )

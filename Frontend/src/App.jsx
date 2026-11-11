@@ -1,12 +1,16 @@
-{/*App.jsx*/ }
-import React, { useState, useRef, useEffect } from 'react';
+// App.jsx
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
 import Message, { TypingBubble } from './components/Message';
 import WelcomeScreen from './components/WelcomeScreen';
 import ChatInput from './components/ChatInput';
 import AuthScreen from './components/AuthScreen';
+import { API, errorMessage } from './config';
 
-const API = 'http://localhost:8000';
+// localStorage can throw in private windows, so every access is guarded
+const stored = (key) => {
+  try { return localStorage.getItem(key); } catch { return null; }
+};
 
 export default function App() {
   const [docs, setDocs] = useState([]);
@@ -15,65 +19,78 @@ export default function App() {
   const [isTyping, setIsTyping] = useState(false);
   const [backendOnline, setBackendOnline] = useState(null); // null=checking
   const messagesEndRef = useRef(null);
-  const [token, setToken] = useState(null);
-  const [role, setRole] = useState(null);
+  // Restored from localStorage so a page refresh does not log the user out
+  const [token, setToken] = useState(() => stored('token'));
+  const [role, setRole] = useState(() => stored('role'));
+
+  const handleLogout = useCallback(() => {
+    try {
+      localStorage.removeItem('token');
+      localStorage.removeItem('role');
+    } catch { /* ignore */ }
+    setToken(null);
+    setRole(null);
+    setMessages([]);
+    setDocs([]);
+    setInputValue('');
+    setBackendOnline(null);
+  }, []);
 
   // Scroll to bottom on new message
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]); 
 
-  // Check backend status on mount
-  // useEffect(() => {
-  //   if (!token) return;
-  //   fetch(`${API}/docs`, {
-  //     headers: {Authorization: `Bearer ${token}`},
-  //   })
-  //     .then(() => setBackendOnline(true))
-  //     .catch(() => setBackendOnline(false));
-  // }, [token]);
-
-  // // Fetch existing docs from backend after login
-  // useEffect(() => {
-  //   if (!token) return;
-  //   fetch(`${API}/docs`, {
-  //     headers: { Authorization: `Bearer ${token}` },
-  //   })
-  //     .then(res => res.json())
-  //     .then(data => setDocs(data.docs || []))
-  //     .catch(() => {});
-  // }, [token]);
-    // Replace your two useEffects (backend check + doc fetch) with this single one:
-
   useEffect(() => {
     if (!token) return;
+    const headers = { Authorization: `Bearer ${token}` };
 
-    const fetchDocs = () => {
-      fetch(`${API}/files`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then(res => {
-          setBackendOnline(res.ok);
-          return res.json();
-        })
-        .then(data => setDocs(data.docs || []))
-        .catch(() => setBackendOnline(false));
+    const sync = async () => {
+      try {
+        const [filesRes, meRes] = await Promise.all([
+          fetch(`${API}/files`, { headers }),
+          fetch(`${API}/auth/me`, { headers }),
+        ]);
+
+        // Token expired or user removed: go back to the login screen
+        if (filesRes.status === 401 || meRes.status === 401) {
+          handleLogout();
+          return;
+        }
+
+        setBackendOnline(filesRes.ok);
+
+        if (filesRes.ok) {
+          const data = await filesRes.json();
+          setDocs(Array.isArray(data.docs) ? data.docs : []);
+        }
+        if (meRes.ok) {
+          // Live role from the server, so an admin's role change shows up without re-login
+          const me = await meRes.json();
+          if (me.role) {
+            setRole(me.role);
+            try { localStorage.setItem('role', me.role); } catch { /* ignore */ }
+          }
+        }
+      } catch {
+        setBackendOnline(false);
+      }
     };
 
     // Fetch immediately on login
-    fetchDocs();
+    sync();
 
     // Then poll every 5 seconds so all tabs stay in sync
-    const interval = setInterval(fetchDocs, 5000);
+    const interval = setInterval(sync, 5000);
 
     return () => clearInterval(interval); // cleanup on logout
-  }, [token]);
-
-  // const handleUploadSuccess = (filename) => {
-  //   setDocs(prev => [...prev, filename]);
-  // };
+  }, [token, handleLogout]);
 
   const handleLogin = (token, role) => {
+    try {
+      localStorage.setItem('token', token);
+      localStorage.setItem('role', role);
+    } catch { /* ignore */ }
     setToken(token);
     setRole(role);
   };
@@ -96,11 +113,19 @@ export default function App() {
         body: JSON.stringify({ question }),
       });
 
-      const data = await res.json();
+      if (res.status === 401) {
+        handleLogout();
+        return;
+      }
+
+      const data = await res.json().catch(() => ({}));
 
       setMessages(prev => [...prev, {
         role: 'ai',
-        text: data.answer || 'No answer was returned.',
+        // Guardrail blocks (400) and server errors carry their reason in `detail`
+        text: res.ok
+          ? (data.answer || 'No answer was returned.')
+          : `⚠️ ${errorMessage(data, 'Something went wrong. Please try again.')}`,
       }]);
 
     } catch {
@@ -108,8 +133,9 @@ export default function App() {
         role: 'ai',
         text: '⚠️ Could not reach the backend. Make sure FastAPI is running:\n\nuvicorn app:app --reload',
       }]);
+    } finally {
+      setIsTyping(false);
     }
-    setIsTyping(false);
   };
 
   const handleSuggestion = (text) => {
@@ -120,7 +146,8 @@ export default function App() {
     if (action === 'delete') {
       setDocs(prev => prev.filter(d => d !== filename));
     } else {
-      setDocs(prev => [...prev, filename]);
+      // Re-uploading a file replaces it, so never list it twice
+      setDocs(prev => (prev.includes(filename) ? prev : [...prev, filename]));
     }
   };
 
@@ -219,6 +246,27 @@ export default function App() {
             <i className="ti ti-shield-check" />
             {role}
           </div>
+
+          <button
+            onClick={handleLogout}
+            title="Log out"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '12px',
+              padding: '5px 10px',
+              borderRadius: '20px',
+              background: 'transparent',
+              border: '1px solid var(--border2)',
+              color: 'var(--text2)',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-body)',
+            }}
+          >
+            <i className="ti ti-logout" />
+            Logout
+          </button>
         </div>
 
         {/* Messages area */}

@@ -12,12 +12,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all backend files from root
 COPY app.py auth.py database.py dependencies.py \
-    guardrails.py ingest.py models.py rag.py ./
+    guardrails.py ingest.py models.py rag.py vector_store.py ./
 
 # Copy routes folder
 COPY routes/ ./routes/
 
-RUN mkdir -p documents vectorstore
+RUN mkdir -p documents
 
 EXPOSE 8000
 

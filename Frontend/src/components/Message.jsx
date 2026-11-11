@@ -1,4 +1,4 @@
-{/*Message.jsx*/ }
+// Message.jsx
 import React from 'react';
 
 export function TypingBubble() {

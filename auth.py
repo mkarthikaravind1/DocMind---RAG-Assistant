@@ -1,12 +1,19 @@
 import bcrypt
 from jose import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-SECRET_KEY = os.getenv("SECRET_KEY") or ""
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    # Never fall back to an empty key: tokens signed with "" can be forged by anyone.
+    raise RuntimeError(
+        "SECRET_KEY is not set. Add it to your .env file "
+        '(generate one with: python -c "import secrets; print(secrets.token_hex(32))").'
+    )
+
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_MINUTES = 60 * 24
 
@@ -15,11 +22,15 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except ValueError:
+        # bcrypt 5 raises for passwords over 72 bytes or a malformed hash
+        return False
 
 def create_token(data: dict) -> str:
     payload = data.copy()
-    payload["exp"] = datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
+    payload["exp"] = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 def decode_token(token: str):
