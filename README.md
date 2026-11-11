@@ -13,6 +13,7 @@ DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that le
   | Manager | ✅ | ❌ | ✅ | ❌ | ❌ |
   | Admin | ✅ | ✅ | ✅ | ✅ | ✅ |
 - **Document-Level Access Control** — every document has an audience (*Everyone*, *Managers & Admins*, or *Admins only*) chosen at upload. The audience is stamped onto each chunk in the vector store and applied as a filter **inside the similarity search**, so text a user is not cleared for never reaches the LLM prompt — it cannot be leaked by clever prompting. The document list is filtered the same way, and admins can change a document's audience at any time without re-uploading.
+- **Source Citations** — every answer shows where it came from. Retrieved excerpts are numbered in the prompt, the model cites them inline as `[1]`, `[2]`, and the API returns the cited sources (document, page number, excerpt). In the chat, each marker and source chip opens the exact excerpt, so answers can be verified at a glance. Sources pass through the same PII redaction as answers and can only come from documents the user's role may access.
 - **Guardrails**
   - **Input validation** — blocks overly long inputs and known prompt-injection patterns (e.g. "ignore previous instructions", "jailbreak", "DAN mode").
   - **Context-grounded answers** — the LLM is strictly prompted to answer only from retrieved document context, with a fixed fallback response when the answer isn't found.
@@ -198,7 +199,7 @@ docker run -d -p 8001:8000 -v chroma_data:/data --name chroma chromadb/chroma:1.
 | POST | `/upload` | Manager, Admin | Upload & ingest a PDF with an `allowed_roles` audience (re-uploading replaces it) |
 | DELETE | `/delete/{filename}` | Admin | Delete a document and its vectors |
 | PATCH | `/documents/{filename}/access` | Admin | Change which roles can access a document |
-| POST | `/chat` | Authenticated | Ask a question (RAG + guardrails), answered only from documents the caller may access |
+| POST | `/chat` | Authenticated | Ask a question (RAG + guardrails); returns the answer plus its cited `sources`, using only documents the caller may access |
 | GET | `/admin/users` | Admin | List all users |
 | PATCH | `/admin/users/{id}/role` | Admin | Update a user's role |
 | GET | `/admin/logs` | Admin | Recent query logs |

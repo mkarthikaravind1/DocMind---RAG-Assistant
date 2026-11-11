@@ -340,7 +340,11 @@ def chat(
     db.add(log)
     db.commit()
 
-    return {"answer": answer, "user": current_user.email}
+    return {
+        "answer":  answer,
+        "sources": result.get("sources", []),   # [{id, filename, page, snippet}]
+        "user":    current_user.email,
+    }
 
 
 def _utc_iso(ts):

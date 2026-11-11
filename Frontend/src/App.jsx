@@ -127,6 +127,8 @@ export default function App() {
         text: res.ok
           ? (data.answer || 'No answer was returned.')
           : `⚠️ ${errorMessage(data, 'Something went wrong. Please try again.')}`,
+        // [{ id, filename, page, snippet }] - the excerpts the answer cites
+        sources: res.ok && Array.isArray(data.sources) ? data.sources : [],
       }]);
 
     } catch {
@@ -292,7 +294,7 @@ export default function App() {
           ) : (
             <>
               {messages.map((msg, i) => (
-                <Message key={i} role={msg.role} text={msg.text} />
+                <Message key={i} role={msg.role} text={msg.text} sources={msg.sources} />
               ))}
               {isTyping && <TypingBubble />}
               <div ref={messagesEndRef} />
