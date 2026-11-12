@@ -3,6 +3,7 @@ import React, { useRef, useState } from 'react';
 import UserPanel from './UserPanel';
 import LogsPanel from './LogsPanel';
 import ChatsPanel from './ChatsPanel';
+import AuditPanel from './AuditPanel';
 import { API, errorMessage } from '../config';
 
 const styles = {
@@ -131,7 +132,7 @@ const audienceColors = {
   admins:   { bg: 'var(--danger-dim)',  color: 'var(--danger)' },
 };
 
-const TAB_ICONS = { docs: 'ti-files', chats: 'ti-messages', users: 'ti-users', logs: 'ti-chart-bar' };
+const TAB_ICONS = { docs: 'ti-files', chats: 'ti-messages', users: 'ti-users', logs: 'ti-chart-bar', audit: 'ti-history' };
 
 export default function Sidebar({
   docs, onUploadSuccess, onDeleteSuccess, onAccessChange, token, role,
@@ -148,8 +149,8 @@ export default function Sidebar({
   const audienceOptions = AUDIENCES.filter(a => role === 'admin' || a.roles.includes(role));
   const [selectedTab, setActiveTab] = useState('docs');
   // Everyone gets Docs and Chats; Users and Logs are admin-only
-  const tabs = role === 'admin' ? ['docs', 'chats', 'users', 'logs'] : ['docs', 'chats'];
-  // If an admin is demoted while on the Users/Logs tab, fall back to Docs
+  const tabs = role === 'admin' ? ['docs', 'chats', 'users', 'logs', 'audit'] : ['docs', 'chats'];
+  // If an admin is demoted while on an admin tab, fall back to Docs
   const activeTab = tabs.includes(selectedTab) ? selectedTab : 'docs';
 
   const handleFile = (f) => {
@@ -268,7 +269,7 @@ export default function Sidebar({
               key={tab}
               onClick={() => setActiveTab(tab)}
               style={{
-                flex: 1, padding: '10px 4px', background: 'none', border: 'none', whiteSpace: 'nowrap',
+                flex: 1, padding: '10px 2px', background: 'none', border: 'none', whiteSpace: 'nowrap',
                 borderBottom: activeTab === tab ? '2px solid var(--accent)' : '2px solid transparent',
                 color: activeTab === tab ? 'var(--accent)' : 'var(--text3)',
                 fontSize: '11px', fontWeight: 600, cursor: 'pointer',
@@ -511,6 +512,8 @@ export default function Sidebar({
           />
       ) : activeTab === 'users'? (
           <UserPanel token={token} />
+      ) : activeTab === 'audit' ? (
+          <AuditPanel token={token} />
       ):(
           <LogsPanel token={token} />
         )}

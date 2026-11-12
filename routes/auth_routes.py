@@ -7,6 +7,7 @@ from database import get_db
 from models import User
 from auth import hash_password, verify_password, create_token
 from dependencies import get_current_user
+import audit
 
 router = APIRouter()
 
@@ -55,6 +56,9 @@ def register(data: RegisterInput, db: Session = Depends(get_db)):
         role="admin" if is_first_user else "employee",
     )
     db.add(user)
+    # Same transaction as the new account
+    audit.add(db, "user_register", actor_email=user.email, actor_role=user.role,
+              target=user.email, details={"role": user.role, "first_admin": is_first_user})
     db.commit()
     return {"message": "User registered successfully", "role": user.role}
 
@@ -64,8 +68,13 @@ def login(data: LoginInput, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == email).first()
 
     if not user or not verify_password(data.password, str(user.hashed_password)):
+        # The reason is for the audit trail only: the response never says which it was
+        audit.record(db, "login_failed", target=email,
+                     details={"reason": "wrong_password" if user else "unknown_account"},
+                     outcome=audit.FAILED)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = create_token({"sub": user.email, "role": user.role})
+    audit.record(db, "login", **audit.actor(user), target=user.email)
     return {"access_token": token, "token_type": "bearer"}
 
 @router.get("/me")

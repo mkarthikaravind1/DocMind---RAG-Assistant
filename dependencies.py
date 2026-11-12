@@ -1,10 +1,11 @@
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from jose import JWTError
 from database import get_db
 from models import User
 from auth import decode_token
+import audit
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
@@ -25,8 +26,16 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Token expired or invalid")
 
 def require_role(*allowed_roles):
-    def checker(current_user: User = Depends(get_current_user)):
+    def checker(
+        request: Request,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
         if current_user.role not in allowed_roles:
+            # Audit trail: a signed-in user tried something their role may not do
+            audit.record(db, "access_denied", **audit.actor(current_user),
+                         target=f"{request.method} {request.url.path}",
+                         details={"required_roles": list(allowed_roles)}, outcome=audit.DENIED)
             raise HTTPException(
                 status_code=403,
                 detail=f"Access denied. Required roles: {list(allowed_roles)}"

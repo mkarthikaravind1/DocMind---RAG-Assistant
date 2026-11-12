@@ -73,6 +73,19 @@ class Feedback(Base):
     created_at   = Column(DateTime, default=utcnow)   # stored as UTC
     updated_at   = Column(DateTime, default=utcnow)
 
+class AuditLog(Base):
+    """One audited event: who did what to what. Insert-only."""
+    __tablename__ = "audit_logs"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    timestamp   = Column(DateTime, default=utcnow, index=True)   # stored as UTC
+    actor_email = Column(String(100), index=True)   # who did it (None for a failed sign-in)
+    actor_role  = Column(String(50))                # their role at that moment
+    action      = Column(String(40), index=True)    # see audit.ACTIONS
+    target      = Column(String(255))               # the user, document or route acted on
+    details     = Column(Text)                      # small JSON object: old/new values, counts, reasons
+    outcome     = Column(String(20))                # success | failed | denied
+
 class QueryLog(Base):
     __tablename__ = "query_logs"
     id               = Column(Integer, primary_key=True, index=True)

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+import audit
 from access import DEFAULT_ROLES, can_access, normalize_roles, roles_from_str, roles_to_str
 from chat_history import get_owned_conversation, recent_history, save_exchange
 from database import engine, Base, get_db, SessionLocal
@@ -24,6 +25,7 @@ from ingest import ingest_pdf, delete_document_chunks, set_document_roles, Inges
 from models import User, QueryLog, Document, Evaluation, Feedback
 from rag import get_answer, stream_answer
 from retrieval import warm_up as warm_up_reranker
+from routes.audit_routes import router as audit_router
 from routes.auth_routes import router as auth_router
 from routes.conversation_routes import router as conversation_router
 from routes.eval_routes import eval_fields, router as eval_router
@@ -73,6 +75,7 @@ app.include_router(conversation_router, prefix="/conversations")
 app.include_router(eval_router, prefix="/admin/evals")
 app.include_router(feedback_router, prefix="/messages")
 app.include_router(feedback_admin_router, prefix="/admin/feedback")
+app.include_router(audit_router, prefix="/admin/audit")
 
 
 def safe_pdf_name(filename: str) -> str:
@@ -161,11 +164,15 @@ def upload_file(
     # A manager must not be able to overwrite (or learn the contents of)
     # a document that is restricted to admins.
     if record and not can_access(role, roles_from_str(record.allowed_roles)):
+        audit.record(db, "document_upload", **audit.actor(current_user), target=filename,
+                     details={"reason": "name belongs to a document this role cannot access"},
+                     outcome=audit.DENIED)
         raise HTTPException(
             status_code=409,
             detail="A document with this name already exists. Please rename your file.",
         )
     already_existed = record is not None or os.path.exists(file_path)
+    previous_roles = roles_from_str(record.allowed_roles) if record else None
 
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -174,11 +181,15 @@ def upload_file(
         chunks = ingest_pdf(file_path, roles)
     except IngestError as e:
         _cleanup_failed_upload(file_path, filename, db)
+        audit.record(db, "document_upload", **audit.actor(current_user), target=filename,
+                     details={"reason": "no readable text"}, outcome=audit.FAILED)
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         # A file that was never indexed must not show up as "Ready"
         _cleanup_failed_upload(file_path, filename, db)
         print(f"[UPLOAD] Ingestion failed for {filename}: {e}")
+        audit.record(db, "document_upload", **audit.actor(current_user), target=filename,
+                     details={"reason": "could not be indexed"}, outcome=audit.FAILED)
         raise HTTPException(
             status_code=500,
             detail="Could not index this file. Check that it is a valid PDF and that ChromaDB is running.",
@@ -191,7 +202,11 @@ def upload_file(
     setattr(record, "uploaded_by", str(current_user.email))
     setattr(record, "chunks", chunks)
     setattr(record, "uploaded_at", datetime.now(timezone.utc))
-    db.commit()
+    audit.add(db, "document_upload", **audit.actor(current_user), target=filename, details={
+        "allowed_roles": roles, "chunks": chunks,
+        "replaced": already_existed, "previous_roles": previous_roles,
+    })
+    db.commit()   # the document record and its audit row together
 
     return {
         "filename":      filename,
@@ -225,11 +240,16 @@ def delete_file(
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
 
+    record = db.query(Document).filter(Document.filename == filename).first()
+    had_roles = roles_from_str(record.allowed_roles) if record else None
+
     # Remove the vectors first, so a deleted document can no longer be used in answers
     try:
         delete_document_chunks(filename)
     except Exception as e:
         print(f"[DELETE] Could not remove chunks for {filename}: {e}")
+        audit.record(db, "document_delete", **audit.actor(current_user), target=filename,
+                     details={"reason": "vector store unreachable"}, outcome=audit.FAILED)
         raise HTTPException(
             status_code=503,
             detail="Could not reach the vector store. The document was not deleted.",
@@ -237,6 +257,8 @@ def delete_file(
 
     os.remove(file_path)
     db.query(Document).filter(Document.filename == filename).delete()
+    audit.add(db, "document_delete", **audit.actor(current_user), target=filename,
+              details={"allowed_roles": had_roles})
     db.commit()
     return {"message": f"{filename} deleted successfully"}
 
@@ -267,11 +289,15 @@ def update_document_access(
         set_document_roles(filename, roles)
     except Exception as e:
         print(f"[ACCESS] Could not update chunks for {filename}: {e}")
+        audit.record(db, "access_change", **audit.actor(current_user), target=filename,
+                     details={"reason": "vector store unreachable"}, outcome=audit.FAILED)
         raise HTTPException(
             status_code=503,
             detail="Could not reach the vector store. Access was not changed.",
         )
 
+    audit.add(db, "access_change", **audit.actor(current_user), target=filename,
+              details={"from": roles_from_str(record.allowed_roles), "to": roles})
     setattr(record, "allowed_roles", roles_to_str(roles))
     db.commit()
     return _doc_payload(record)
@@ -309,8 +335,10 @@ def update_role(
         if int(user.id) == int(current_user.id): # type: ignore
             raise HTTPException(status_code=400, detail="Cannot change your own role")
 
+    audit.add(db, "role_change", **audit.actor(current_user), target=user.email,
+              details={"from": user.role, "to": body.role})
     setattr(user,"role",body.role)
-    db.commit()
+    db.commit()   # the new role and its audit row together
     return {"message": f"{user.email} is now {body.role}"}
 
 # ── Chat ───────────────────────────────────────────────────────────

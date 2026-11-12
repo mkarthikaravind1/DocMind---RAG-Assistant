@@ -21,7 +21,8 @@ DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that le
 - **Conversation Memory & Chat History** — chats are saved per user and can be reopened, continued or deleted from the Chats tab; the current chat survives a page refresh. Follow-up questions ("from when does it start?") are rewritten into standalone questions using the recent turns before retrieval. History is used *only* for that rewrite: every answer is still built from freshly retrieved, access-filtered excerpts, so memory can never re-serve content from a document the user has since lost access to. Conversations are private to their owner, including from admins.
 - **Answer Quality Evaluation** — every answered question is scored in the background on the two core RAGAS metrics, computed directly with the existing Groq model and embeddings (no extra dependency). **Faithfulness**: the answer is split into statements and each is checked against the retrieved excerpts, which exposes hallucination. **Answer relevancy**: the judge writes the questions the answer would answer, and their embedding similarity to the real question shows whether the answer drifted. The admin dashboard shows the averages, the number of low-faithfulness answers, the share of questions the documents could not answer, and both scores on every query. Scoring never delays or breaks a chat, and only numbers are stored.
 - **Answer Feedback** — every answer has a thumbs up and a thumbs down. A thumbs down can carry one of four one-click reasons (wrong answer, missing information, wrong source, not relevant). Votes are saved with the conversation, can be changed or cleared, and only the owner of a conversation can vote on its answers. The admin dashboard shows the satisfaction rate, the share of answers rated, the reasons given, and each vote next to its query and quality scores, so a thumbs down can be compared with the faithfulness score of the same answer. No free text is collected, so feedback cannot carry PII or document content.
-- **Automated Tests & CI** — a pytest suite of about 175 tests runs the real application in-process and covers authentication, role boundaries, document-level access control, hybrid retrieval, answer evaluation, feedback, citations, streaming redaction and conversation memory. It needs no Docker, database server or API key, and GitHub Actions runs it (plus the frontend build) on every push and pull request.
+- **Audit Trail** — a permanent, admin-only record of who changed what: role changes (old and new role), document uploads and replacements (audience, chunk count), deletes, access changes (old and new audience) and new accounts, plus security events: sign-ins, failed sign-ins and permission-denied attempts. Failed and refused actions are recorded with a reason. A change and its audit row are saved in the same database transaction, the trail is insert-only with no API to edit or delete it, and it never holds document text, passwords or tokens. The admin Audit tab shows it as plain sentences with a filter by event type.
+- **Automated Tests & CI** — a pytest suite of about 195 tests runs the real application in-process and covers authentication, role boundaries, document-level access control, hybrid retrieval, answer evaluation, feedback, the audit trail, citations, streaming redaction and conversation memory. It needs no Docker, database server or API key, and GitHub Actions runs it (plus the frontend build) on every push and pull request.
 - **Guardrails**
   - **Input validation** — blocks overly long inputs and known prompt-injection patterns (e.g. "ignore previous instructions", "jailbreak", "DAN mode").
   - **Context-grounded answers** — the LLM is strictly prompted to answer only from retrieved document context, with a fixed fallback response when the answer isn't found.
@@ -32,6 +33,7 @@ DocMind is a full-stack Retrieval-Augmented Generation (RAG) application that le
   - Aggregate stats: total queries, average response time, guardrail violations, average chunks retrieved.
   - Answer quality: average faithfulness and answer relevancy, low-scoring answers, not-answered rate.
   - User feedback: satisfaction rate, share of answers rated, thumbs-down reasons.
+  - Audit trail of administrative changes and security events.
 - **Modern Chat UI** — React single-page app with drag-and-drop PDF upload, live document indexing status, typing indicators, and a backend health indicator.
 - **Containerized Frontend** — multi-stage Docker build (Node → Nginx) for production-ready static serving.
 
@@ -83,6 +85,7 @@ RAG_RBAC_Project/
 ├── app.py                  # FastAPI app & route definitions
 ├── access.py               # Document-level access rules (roles, chunk flags, search filter)
 ├── chat_history.py         # Saved conversations: ownership checks, history window, storage
+├── audit.py                # Audit trail: insert-only record of changes and security events
 ├── auth.py                 # Password hashing & JWT helpers
 ├── database.py              # SQLAlchemy engine/session setup
 ├── evaluation.py            # Answer quality scores: faithfulness and answer relevancy (background)
@@ -93,8 +96,9 @@ RAG_RBAC_Project/
 ├── rag.py                   # Prompt building, Groq LLM answer generation, citations
 ├── retrieval.py             # Hybrid search: vector + BM25, rank fusion, cross-encoder reranking
 ├── vector_store.py          # Shared embedding model + Chroma connection
-├── models.py                # ORM models (users, documents, conversations, query logs, evaluations, feedback)
+├── models.py                # ORM models (users, documents, conversations, query logs, evaluations, feedback, audit log)
 └── routes/
+    ├── audit_routes.py      # /admin/audit (read-only)
     ├── auth_routes.py       # /auth/register, /auth/login, /auth/me
     ├── conversation_routes.py  # /conversations (list, open, delete)
     ├── eval_routes.py       # /admin/evals (quality scores and their stats)
@@ -117,6 +121,7 @@ Frontend/
         ├── WelcomeScreen.jsx
         ├── ChatsPanel.jsx      # Saved conversations
         ├── UserPanel.jsx       # Admin: role management
+        ├── AuditPanel.jsx      # Admin: audit trail
         └── LogsPanel.jsx       # Admin: monitoring dashboard, answer quality, user feedback
 ```
 
@@ -223,6 +228,7 @@ cannot: that text from a restricted document was **never sent to either model at
 | `tests/test_chat.py` | Answers, citations, redaction, access-filtered retrieval, streaming |
 | `tests/test_retrieval.py` | BM25 keyword search, rank fusion, reranking and its failure fallback, role filtering of every search |
 | `tests/test_evaluation.py` | Faithfulness and relevancy scoring, judge-output parsing, sampling, judge failures, and that the judge and the admin see no restricted, private or PII text |
+| `tests/test_audit.py` | Every audited event with its old and new values, failed and refused actions, denials, filters and paging, and that the trail holds no secrets and cannot be changed through the API |
 | `tests/test_feedback.py` | Voting, switching and clearing, reasons, ownership, admin stats, votes after a conversation is deleted |
 | `tests/test_conversations.py` | Follow-up rewriting, saved history, privacy, memory after access is revoked |
 | `tests/test_monitoring.py` | Query logs, stats, CORS |
@@ -270,6 +276,7 @@ still needs a run against the live stack.
 | PUT | `/messages/{id}/feedback` | Owner | Rate an answer: `rating` is `up`, `down` or `null` (clear); `reason` is optional with `down` |
 | GET | `/admin/users` | Admin | List all users |
 | PATCH | `/admin/users/{id}/role` | Admin | Update a user's role |
+| GET | `/admin/audit` | Admin | Audit trail, newest first; filter with `action`, `actor`, `outcome`; page with `limit` and `before` |
 | GET | `/admin/logs` | Admin | Recent query logs, each with its quality scores when evaluated |
 | GET | `/admin/logs/stats` | Admin | Aggregate usage stats |
 | GET | `/admin/evals` | Admin | Recent answer quality evaluations (scores only, no answer or document text) |
@@ -290,6 +297,7 @@ still needs a run against the live stack.
 - **Defense in depth** — guardrails run on both the input (length, prompt-injection regex checks) and the output (PII pattern redaction), independent of the LLM's own behavior.
 - **Self-role-change protection** — admins are blocked from changing their own role via the API to prevent accidental lockout.
 - **Observability by default** — every chat request, including guardrail-blocked ones, is logged with response time and chunk count for the admin dashboard.
+- **An audit trail that cannot drift from reality** — the audit row is added to the same transaction as the change it describes, so neither can be saved without the other. Events that change nothing (sign-ins, denials, failures) are written separately and can never turn a refused request into a server error. A failed sign-in records whether the account was unknown or the password wrong, while the response to the caller stays identical for both.
 
 ## Future Improvements
 
