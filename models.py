@@ -45,6 +45,21 @@ class Message(Base):
     sources         = Column(Text)                 # JSON list of cited sources (ai messages)
     created_at      = Column(DateTime, default=utcnow)
 
+class Evaluation(Base):
+    """Answer quality scores for one logged query. Numbers only, no text."""
+    __tablename__ = "evaluations"
+
+    id                   = Column(Integer, primary_key=True, index=True)
+    query_log_id         = Column(Integer, index=True)
+    status               = Column(String(20))     # scored | not_answered | failed
+    faithfulness         = Column(Float)          # 0..1, None if it could not be scored
+    answer_relevancy     = Column(Float)          # 0..1, None if it could not be scored
+    statements_total     = Column(Integer)        # statements found in the answer
+    statements_supported = Column(Integer)        # ...that the excerpts support
+    judge_model          = Column(String(100))
+    eval_time            = Column(Float)          # seconds
+    created_at           = Column(DateTime, default=utcnow)   # stored as UTC
+
 class QueryLog(Base):
     __tablename__ = "query_logs"
     id               = Column(Integer, primary_key=True, index=True)

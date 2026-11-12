@@ -9,9 +9,50 @@ const roleColors = {
   employee: { bg: 'var(--surface3)',   color: 'var(--text3)' },
 };
 
+// Answer quality scores are 0..1; shown as a percentage
+const pct = v => (v === null || v === undefined ? '–' : `${Math.round(v * 100)}%`);
+
+const sectionTitle = {
+  fontSize: '10px', fontWeight: 600, color: 'var(--text3)',
+  letterSpacing: '1px', textTransform: 'uppercase',
+};
+
+function StatCard({ icon, label, value, hint, alert }) {
+  return (
+    <div title={hint} style={{
+      background: 'var(--surface2)', border: '1px solid var(--border)',
+      borderRadius: '8px', padding: '10px 12px',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+        <i className={`ti ${icon}`} style={{ fontSize: '13px', color: 'var(--accent-light)' }} />
+        <span style={{ fontSize: '10px', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+          {label}
+        </span>
+      </div>
+      <div style={{ fontSize: '20px', fontWeight: 700, color: alert ? 'var(--danger)' : 'var(--text)' }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ScoreChip({ label, value, threshold }) {
+  const low = value < threshold;
+  return (
+    <span style={{
+      fontSize: '10px', padding: '1px 7px', borderRadius: '20px', fontWeight: 600,
+      background: low ? 'var(--danger-dim)' : 'var(--success-dim)',
+      color:      low ? 'var(--danger)'     : 'var(--success)',
+    }}>
+      {label} {pct(value)}
+    </span>
+  );
+}
+
 export default function LogsPanel({ token }) {
   const [logs,  setLogs]  = useState([]);
   const [stats, setStats] = useState(null);
+  const [quality, setQuality] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -20,13 +61,18 @@ export default function LogsPanel({ token }) {
 
     const fetchAll = async () => {
       try {
-        const [logsRes, statsRes] = await Promise.all([
-          fetch(`${API}/admin/logs`,       { headers: { Authorization: `Bearer ${token}` } }),
-          fetch(`${API}/admin/logs/stats`, { headers: { Authorization: `Bearer ${token}` } }),
+        const [logsRes, statsRes, qualityRes] = await Promise.all([
+          fetch(`${API}/admin/logs`,        { headers: { Authorization: `Bearer ${token}` } }),
+          fetch(`${API}/admin/logs/stats`,  { headers: { Authorization: `Bearer ${token}` } }),
+          fetch(`${API}/admin/evals/stats`, { headers: { Authorization: `Bearer ${token}` } }),
         ]);
-        const logsData  = await logsRes.json().catch(() => ({}));
-        const statsData = await statsRes.json().catch(() => ({}));
+        const logsData    = await logsRes.json().catch(() => ({}));
+        const statsData   = await statsRes.json().catch(() => ({}));
+        const qualityData = await qualityRes.json().catch(() => null);
         if (cancelled) return;
+
+        // Quality scores are an extra: if they fail to load, the rest still shows
+        setQuality(qualityRes.ok && qualityData ? qualityData : null);
 
         // On 401/403 the body is { detail }, not a list: never pass that to .map()
         if (!logsRes.ok || !statsRes.ok || !Array.isArray(logsData)) {
@@ -55,14 +101,29 @@ export default function LogsPanel({ token }) {
     { label: 'Avg Chunks Used',     value: stats.avg_chunks,           icon: 'ti-packages' },
   ] : [];
 
+  const threshold = quality?.low_score_threshold ?? 0.7;
+  // Relevancy is an embedding similarity and runs lower, so it has its own line
+  const relevancyThreshold = quality?.low_relevancy_threshold ?? 0.6;
+  const isLow = (v, limit = threshold) => v !== null && v !== undefined && v < limit;
+  const qualityCards = quality ? [
+    { label: 'Faithfulness',     value: pct(quality.avg_faithfulness),     icon: 'ti-shield-check',
+      alert: isLow(quality.avg_faithfulness),
+      hint: 'How much of each answer is supported by the retrieved excerpts (average)' },
+    { label: 'Answer Relevancy', value: pct(quality.avg_answer_relevancy), icon: 'ti-target-arrow',
+      alert: isLow(quality.avg_answer_relevancy, relevancyThreshold),
+      hint: 'How directly each answer addresses the question that was asked (average)' },
+    { label: 'Low Faithfulness', value: quality.low_faithfulness,          icon: 'ti-alert-triangle',
+      alert: quality.low_faithfulness > 0,
+      hint: `Answers scoring below ${pct(threshold)} faithfulness` },
+    { label: 'Not Answered',     value: pct(quality.not_answered_rate),    icon: 'ti-help-circle',
+      hint: 'Share of evaluated questions the documents could not answer' },
+  ] : [];
+
   return (
     <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1 }}>
 
       {/* Header */}
-      <div style={{
-        fontSize: '10px', fontWeight: 600, color: 'var(--text3)',
-        letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '14px',
-      }}>
+      <div style={{ ...sectionTitle, marginBottom: '14px' }}>
         Monitoring Dashboard
       </div>
 
@@ -82,30 +143,33 @@ export default function LogsPanel({ token }) {
           display: 'grid', gridTemplateColumns: '1fr 1fr',
           gap: '8px', marginBottom: '16px',
         }}>
-          {statCards.map((s, i) => (
-            <div key={i} style={{
-              background: 'var(--surface2)', border: '1px solid var(--border)',
-              borderRadius: '8px', padding: '10px 12px',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                <i className={`ti ${s.icon}`} style={{ fontSize: '13px', color: 'var(--accent-light)' }} />
-                <span style={{ fontSize: '10px', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                  {s.label}
-                </span>
-              </div>
-              <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text)' }}>
-                {s.value}
-              </div>
-            </div>
-          ))}
+          {statCards.map((s, i) => <StatCard key={i} {...s} />)}
         </div>
       )}
 
+      {/* Answer quality: faithfulness and answer relevancy */}
+      {quality && (
+        <>
+          <div style={{ ...sectionTitle, marginBottom: '10px' }}>
+            Answer Quality
+          </div>
+          <div style={{
+            display: 'grid', gridTemplateColumns: '1fr 1fr',
+            gap: '8px', marginBottom: '6px',
+          }}>
+            {qualityCards.map((s, i) => <StatCard key={i} {...s} />)}
+          </div>
+          <div style={{ fontSize: '10px', color: 'var(--text3)', marginBottom: '16px' }}>
+            {quality.evaluated === 0
+              ? (quality.sample_rate > 0 ? 'No answers scored yet.' : 'Evaluation is switched off.')
+              : `${quality.evaluated} answers scored by ${quality.judge_model}`}
+            {quality.failed > 0 && ` · ${quality.failed} could not be scored`}
+          </div>
+        </>
+      )}
+
       {/* Log entries */}
-      <div style={{
-        fontSize: '10px', fontWeight: 600, color: 'var(--text3)',
-        letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '10px',
-      }}>
+      <div style={{ ...sectionTitle, marginBottom: '10px' }}>
         Recent Queries
       </div>
 
@@ -159,9 +223,9 @@ export default function LogsPanel({ token }) {
               "{log.question}"
             </div>
 
-            {/* Bottom row — stats */}
+            {/* Bottom row — stats and quality scores */}
             {!log.guardrail_hit && (
-              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: '14px', rowGap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
                 {[
                   { icon: 'ti-clock',    val: `${log.response_time}s` },
                   { icon: 'ti-packages', val: `${log.chunks_retrieved} chunks` },
@@ -172,6 +236,20 @@ export default function LogsPanel({ token }) {
                     {m.val}
                   </span>
                 ))}
+                {log.faithfulness !== null && log.faithfulness !== undefined && (
+                  <ScoreChip label="Faithful" value={log.faithfulness} threshold={threshold} />
+                )}
+                {log.answer_relevancy !== null && log.answer_relevancy !== undefined && (
+                  <ScoreChip label="Relevant" value={log.answer_relevancy} threshold={relevancyThreshold} />
+                )}
+                {log.eval_status === 'not_answered' && (
+                  <span style={{
+                    fontSize: '10px', padding: '1px 7px', borderRadius: '20px', fontWeight: 600,
+                    background: 'var(--surface3)', color: 'var(--text3)',
+                  }}>
+                    Not answered
+                  </span>
+                )}
               </div>
             )}
 

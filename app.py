@@ -16,14 +16,16 @@ from sqlalchemy.orm import Session
 from access import DEFAULT_ROLES, can_access, normalize_roles, roles_from_str, roles_to_str
 from chat_history import get_owned_conversation, recent_history, save_exchange
 from database import engine, Base, get_db, SessionLocal
+from evaluation import schedule as schedule_evaluation
 from dependencies import get_current_user, require_role
 from guardrails import validate_input
 from ingest import ingest_pdf, delete_document_chunks, set_document_roles, IngestError
-from models import User, QueryLog, Document
+from models import User, QueryLog, Document, Evaluation
 from rag import get_answer, stream_answer
 from retrieval import warm_up as warm_up_reranker
 from routes.auth_routes import router as auth_router
 from routes.conversation_routes import router as conversation_router
+from routes.eval_routes import eval_fields, router as eval_router
 from vector_store import get_embeddings
 
 # Create DB tables on startup
@@ -66,6 +68,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # Include auth routes
 app.include_router(auth_router, prefix="/auth")
 app.include_router(conversation_router, prefix="/conversations")
+app.include_router(eval_router, prefix="/admin/evals")
 
 
 def safe_pdf_name(filename: str) -> str:
@@ -308,15 +311,18 @@ def update_role(
 
 # ── Chat ───────────────────────────────────────────────────────────
 def _log_query(db: Session, email: str, role: str, question: str, *,
-               answer_length=0, response_time=0.0, chunks=0, guardrail_hit=None) -> None:
-    db.add(QueryLog(
+               answer_length=0, response_time=0.0, chunks=0, guardrail_hit=None) -> int:
+    """Store one query log row and return its id."""
+    row = QueryLog(
         user_email=email, user_role=role, question=question[:500],
         answer_length=answer_length, response_time=response_time,
         chunks_retrieved=chunks,
         guardrail_hit=guardrail_hit[:100] if guardrail_hit else None,
         timestamp=datetime.now(timezone.utc),
-    ))
+    )
+    db.add(row)
     db.commit()
+    return int(row.id)  # type: ignore[arg-type]
 
 
 def _prepare_chat(request: ChatRequest, current_user: User, db: Session):
@@ -366,8 +372,10 @@ def chat(
     conversation_id = save_exchange(
         db, user_id, conversation_id, question, result["answer"], result["sources"]
     )
-    _log_query(db, email, role, question, answer_length=len(result["answer"]),
-               response_time=elapsed, chunks=result["chunks_retrieved"])
+    log_id = _log_query(db, email, role, question, answer_length=len(result["answer"]),
+                        response_time=elapsed, chunks=result["chunks_retrieved"])
+    # Quality scores are worked out in the background, after this response
+    schedule_evaluation(log_id, result["answer"], result.get("eval_input"))
 
     return {
         "answer":          result["answer"],
@@ -413,9 +421,10 @@ def chat_stream(
                 saved_id = save_exchange(
                     own_db, user_id, conversation_id, question, result["answer"], result["sources"]
                 )
-                _log_query(own_db, email, role, question, answer_length=len(result["answer"]),
-                           response_time=round(time.time() - start, 3),
-                           chunks=result["chunks_retrieved"])
+                log_id = _log_query(own_db, email, role, question, answer_length=len(result["answer"]),
+                                    response_time=round(time.time() - start, 3),
+                                    chunks=result["chunks_retrieved"])
+                schedule_evaluation(log_id, result["answer"], result.get("eval_input"))
                 yield _sse("done", {
                     "answer":          result["answer"],
                     "sources":         result["sources"],
@@ -452,6 +461,11 @@ def get_logs(
     db: Session = Depends(get_db)
 ):
     logs = db.query(QueryLog).order_by(QueryLog.timestamp.desc()).limit(100).all()
+    # Quality scores, where the query was evaluated (see evaluation.py)
+    evals = {
+        e.query_log_id: e
+        for e in db.query(Evaluation).filter(Evaluation.query_log_id.in_([l.id for l in logs])).all()
+    }
     return [
         {
             "id":               l.id,
@@ -463,6 +477,7 @@ def get_logs(
             "chunks_retrieved": l.chunks_retrieved,
             "guardrail_hit":    l.guardrail_hit,
             "timestamp":        _utc_iso(l.timestamp),
+            **eval_fields(evals.get(l.id)),
         }
         for l in logs
     ]

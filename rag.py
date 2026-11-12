@@ -140,6 +140,18 @@ def _finalize(cleaned_answer: str, retrieved_docs: list) -> dict:
     }
 
 
+def _with_eval_input(result: dict, question: str, retrieved_docs: list) -> dict:
+    """
+    Attach what the quality evaluation needs: the standalone question and the
+    excerpts the model was given. Internal only: the API never returns this key.
+    """
+    result["eval_input"] = {
+        "question": question,
+        "contexts": [doc.page_content for doc in retrieved_docs],
+    }
+    return result
+
+
 NO_CONTEXT_RESULT = {"answer": FALLBACK_ANSWER, "sources": [], "chunks_retrieved": 0}
 
 
@@ -157,7 +169,7 @@ def get_answer(question: str, user_role: str, history=None) -> dict:
     if pii_found:
         print(f"[GUARDRAIL] PII redacted: {pii_found}")
 
-    return _finalize(cleaned_answer, retrieved_docs)
+    return _with_eval_input(_finalize(cleaned_answer, retrieved_docs), question, retrieved_docs)
 
 
 def stream_answer(question: str, user_role: str, history=None):
@@ -196,4 +208,4 @@ def stream_answer(question: str, user_role: str, history=None):
     if redactor.found:
         print(f"[GUARDRAIL] PII redacted: {redactor.found}")
 
-    yield "done", _finalize("".join(parts), retrieved_docs)
+    yield "done", _with_eval_input(_finalize("".join(parts), retrieved_docs), question, retrieved_docs)

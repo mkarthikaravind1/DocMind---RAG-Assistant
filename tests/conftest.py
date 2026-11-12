@@ -10,6 +10,8 @@ model download or Groq API key:
   MiniLM embeddings-> FakeEmbeddings (keyword hashing) (patched per test)
   Groq LLM         -> FakeLLM (rule-based, records every prompt it is given)
   Cross-encoder    -> FakeReranker (word overlap, records every passage it is given)
+  Judge LLM        -> the same FakeLLM (its judge prompts are recorded separately)
+  Background worker-> evaluations run inline, so a test sees the scores at once
 
 BM25 keyword search is plain Python, so it runs for real.
 """
@@ -90,15 +92,50 @@ class FakeLLM:
     * Follow-up rewriting prompts: appends the previous user question, which
       carries the topic forward.
 
-    Every prompt is recorded in `prompts`, so a test can prove that restricted
-    text was never sent to the model at all.
+    * Quality-evaluation (judge) prompts: splits the answer into sentences,
+      calls a statement supported when all its keywords appear in the context,
+      and turns the answer into three questions.
+
+    Every prompt is recorded, so a test can prove that restricted text was
+    never sent to the model at all: chat prompts in `prompts`, judge prompts in
+    `judge_prompts`.
     """
 
     def __init__(self):
         self.prompts = []
+        self.judge_prompts = []
         self.fail = False
+        self.judge_fail = False
+
+    @staticmethod
+    def _between(prompt, start, end):
+        return prompt.split(start, 1)[1].split(end, 1)[0]
+
+    def _judge_reply(self, prompt: str):
+        """The reply to a quality-evaluation prompt, or None for any other prompt."""
+        if prompt.startswith("Break the answer below"):
+            answer = self._between(prompt, "\n\nAnswer:\n", "\n\nStatements:")
+            return "\n".join(s for s in re.split(r"(?<=[.!?])\s+", answer) if s.strip())
+        if prompt.startswith("Check each numbered statement"):
+            context = keywords(self._between(prompt, "Context:\n", "\n\nStatements:\n"))
+            statements = self._between(prompt, "\n\nStatements:\n", "\n\nVerdicts:")
+            return "\n".join(
+                f"{number}: {'yes' if keywords(text) <= context else 'no'}"
+                for number, text in re.findall(r"(?m)^(\d+)\. (.*)$", statements)
+            )
+        if prompt.startswith("Write 3 different questions"):
+            answer = self._between(prompt, "\n\nAnswer:\n", "\n\nQuestions:")
+            return "\n".join(f"{lead} {answer}?" for lead in ("What about", "Can you explain", "Is it true that"))
+        return None
 
     def _reply(self, prompt: str) -> str:
+        if prompt.startswith(("Break the answer below", "Check each numbered statement",
+                              "Write 3 different questions")):
+            self.judge_prompts.append(prompt)
+            if self.fail or self.judge_fail:
+                raise RuntimeError("simulated judge outage")
+            return self._judge_reply(prompt)
+
         self.prompts.append(prompt)
         if self.fail:
             raise RuntimeError("simulated LLM outage")
@@ -297,6 +334,7 @@ def env(monkeypatch, _chroma):
     """A completely fresh application state for each test."""
     import app as app_module
     import database
+    import evaluation
     import rag
     import retrieval
     import vector_store
@@ -326,6 +364,12 @@ def env(monkeypatch, _chroma):
     monkeypatch.setattr(rag, "llm", llm)
     monkeypatch.setattr(vector_store, "get_chroma_client", lambda: _chroma)
     monkeypatch.setattr(vector_store, "get_embeddings", lambda: FakeEmbeddings())
+
+    # Quality evaluation: every answer, run inline instead of on the worker thread
+    monkeypatch.setattr(evaluation, "_submit", lambda job, *args: job(*args))
+    monkeypatch.setattr(evaluation, "SAMPLE_RATE", 1.0)
+    monkeypatch.setattr(evaluation, "EVAL_MODEL", "")
+    monkeypatch.setattr(evaluation, "_pending", 0)
 
     reranker = FakeReranker()
     monkeypatch.setattr(retrieval, "get_reranker", lambda: reranker)
