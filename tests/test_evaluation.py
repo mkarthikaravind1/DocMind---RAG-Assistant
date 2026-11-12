@@ -287,9 +287,9 @@ def test_pii_typed_into_a_question_is_redacted_in_the_evaluation_list(env, libra
 
 def test_chat_responses_do_not_carry_the_internal_evaluation_input(env, library):
     body = env.ask(library["employee"], Q_LEAVE).json()
-    assert set(body) == {"answer", "sources", "conversation_id", "user"}
+    assert set(body) == {"answer", "sources", "conversation_id", "message_id", "user"}
     done = parse_sse(env.ask_stream(library["employee"], Q_LEAVE).text)[-1][1]
-    assert set(done) == {"answer", "sources", "conversation_id", "user"}
+    assert set(done) == {"answer", "sources", "conversation_id", "message_id", "user"}
 
     conversation = env.client.get(f"/conversations/{body['conversation_id']}", headers=library["employee"])
     assert "eval_input" not in conversation.text and "contexts" not in conversation.text

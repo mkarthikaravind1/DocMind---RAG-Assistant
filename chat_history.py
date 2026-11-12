@@ -46,9 +46,9 @@ def save_exchange(
     question: str,
     answer: str,
     sources: list,
-) -> int:
+) -> tuple[int, int]:
     """
-    Store one question/answer pair and return the conversation id.
+    Store one question/answer pair and return (conversation id, id of the saved answer).
     A new conversation is created here (not earlier), so a failed or blocked
     first question never leaves an empty conversation behind.
     """
@@ -71,12 +71,13 @@ def save_exchange(
 
     setattr(conv, "updated_at", now)
     db.add(Message(conversation_id=conv.id, role="user", content=question, created_at=now))
-    db.add(Message(
+    reply = Message(
         conversation_id=conv.id, role="ai", content=answer,
         sources=json.dumps(sources or []), created_at=now,
-    ))
+    )
+    db.add(reply)
     db.commit()
-    return int(conv.id)  # type: ignore[arg-type]
+    return int(conv.id), int(reply.id)  # type: ignore[arg-type]
 
 
 def load_sources(message: Message) -> list:

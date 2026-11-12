@@ -174,7 +174,81 @@ function Sources({ sources, openId, onToggle }) {
   );
 }
 
-export default function Message({ role, text, sources = [], streaming = false }) {
+// Offered after a thumbs down. Keys must match REASONS in the backend's feedback.py
+const DOWN_REASONS = [
+  { key: 'wrong_answer', label: 'Wrong answer' },
+  { key: 'missing_info', label: 'Missing information' },
+  { key: 'wrong_source', label: 'Wrong source' },
+  { key: 'not_relevant', label: 'Not relevant' },
+];
+
+function ThumbButton({ icon, label, active, color, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: '26px', height: '26px', borderRadius: '50%', cursor: 'pointer',
+        border: `1px solid ${active ? color : 'var(--border2)'}`,
+        background: active ? color : 'transparent',
+        color: active ? 'white' : 'var(--text3)',
+        fontSize: '14px', transition: 'var(--transition)',
+      }}
+    >
+      <i className={`ti ${icon}`} />
+    </button>
+  );
+}
+
+// Thumbs up / down under an answer, with optional one-click reasons for a thumbs down
+function Feedback({ feedback, onChange }) {
+  const rating = feedback?.rating || null;
+  const reason = feedback?.reason || null;
+  // Clicking the active thumb clears the vote
+  const pick = (value) => onChange(rating === value ? null : value, null);
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap',
+      marginTop: '10px', whiteSpace: 'normal', lineHeight: 1.4,
+    }}>
+      <ThumbButton icon="ti-thumb-up" label="Good answer" active={rating === 'up'}
+                   color="var(--success)" onClick={() => pick('up')} />
+      <ThumbButton icon="ti-thumb-down" label="Bad answer" active={rating === 'down'}
+                   color="var(--danger)" onClick={() => pick('down')} />
+      {rating === 'down' && (
+        <>
+          <span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '4px' }}>What was wrong?</span>
+          {DOWN_REASONS.map(r => (
+            <button
+              key={r.key}
+              type="button"
+              aria-pressed={reason === r.key}
+              onClick={() => onChange('down', reason === r.key ? null : r.key)}
+              style={{
+                fontSize: '11px', padding: '2px 9px', borderRadius: '20px', cursor: 'pointer',
+                border: `1px solid ${reason === r.key ? 'var(--danger)' : 'var(--border2)'}`,
+                background: reason === r.key ? 'var(--danger-dim)' : 'transparent',
+                color: reason === r.key ? 'var(--danger)' : 'var(--text2)',
+                fontFamily: 'inherit', transition: 'var(--transition)',
+              }}
+            >
+              {r.label}
+            </button>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+export default function Message({
+  role, text, sources = [], streaming = false, messageId = null, feedback = null, onFeedback,
+}) {
   const isUser = role === 'user';
   const [openId, setOpenId] = useState(null);   // which source excerpt is expanded
   const toggle = (id) => setOpenId(prev => (prev === id ? null : id));
@@ -240,6 +314,10 @@ export default function Message({ role, text, sources = [], streaming = false })
           }} />
         )}
         {hasSources && <Sources sources={sources} openId={openId} onToggle={toggle} />}
+        {/* Only saved answers have an id, so errors and half-streamed answers cannot be rated */}
+        {!isUser && !streaming && messageId && onFeedback && (
+          <Feedback feedback={feedback} onChange={(rating, reason) => onFeedback(messageId, rating, reason)} />
+        )}
       </div>
     </div>
   );

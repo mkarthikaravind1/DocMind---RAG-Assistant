@@ -17,15 +17,17 @@ from access import DEFAULT_ROLES, can_access, normalize_roles, roles_from_str, r
 from chat_history import get_owned_conversation, recent_history, save_exchange
 from database import engine, Base, get_db, SessionLocal
 from evaluation import schedule as schedule_evaluation
+from feedback import feedback_payload, link_answer
 from dependencies import get_current_user, require_role
 from guardrails import validate_input
 from ingest import ingest_pdf, delete_document_chunks, set_document_roles, IngestError
-from models import User, QueryLog, Document, Evaluation
+from models import User, QueryLog, Document, Evaluation, Feedback
 from rag import get_answer, stream_answer
 from retrieval import warm_up as warm_up_reranker
 from routes.auth_routes import router as auth_router
 from routes.conversation_routes import router as conversation_router
 from routes.eval_routes import eval_fields, router as eval_router
+from routes.feedback_routes import admin_router as feedback_admin_router, message_router as feedback_router
 from vector_store import get_embeddings
 
 # Create DB tables on startup
@@ -69,6 +71,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.include_router(auth_router, prefix="/auth")
 app.include_router(conversation_router, prefix="/conversations")
 app.include_router(eval_router, prefix="/admin/evals")
+app.include_router(feedback_router, prefix="/messages")
+app.include_router(feedback_admin_router, prefix="/admin/feedback")
 
 
 def safe_pdf_name(filename: str) -> str:
@@ -369,18 +373,21 @@ def chat(
         )
     elapsed = round(time.time() - start, 3)
 
-    conversation_id = save_exchange(
+    conversation_id, message_id = save_exchange(
         db, user_id, conversation_id, question, result["answer"], result["sources"]
     )
     log_id = _log_query(db, email, role, question, answer_length=len(result["answer"]),
                         response_time=elapsed, chunks=result["chunks_retrieved"])
     # Quality scores are worked out in the background, after this response
     schedule_evaluation(log_id, result["answer"], result.get("eval_input"))
+    # Lets a later thumbs up/down be shown next to this query in the dashboard
+    link_answer(db, message_id, log_id, user_id)
 
     return {
         "answer":          result["answer"],
         "sources":         result["sources"],   # [{id, filename, page, snippet}]
         "conversation_id": conversation_id,
+        "message_id":      message_id,          # used to rate this answer
         "user":            email,
     }
 
@@ -400,7 +407,7 @@ def chat_stream(
     """
     Same as /chat, but the answer arrives piece by piece as Server-Sent Events:
       event: token  data: {"text": "..."}             (many)
-      event: done   data: {"answer", "sources", "conversation_id"}   (once, at the end)
+      event: done   data: {"answer", "sources", "conversation_id", "message_id"}   (once, at the end)
       event: error  data: {"detail": "..."}           (instead of done, on failure)
     Guardrail blocks are returned as a normal 400 JSON error before any stream starts.
     """
@@ -418,17 +425,19 @@ def chat_stream(
                     continue
 
                 result = payload
-                saved_id = save_exchange(
+                saved_id, message_id = save_exchange(
                     own_db, user_id, conversation_id, question, result["answer"], result["sources"]
                 )
                 log_id = _log_query(own_db, email, role, question, answer_length=len(result["answer"]),
                                     response_time=round(time.time() - start, 3),
                                     chunks=result["chunks_retrieved"])
                 schedule_evaluation(log_id, result["answer"], result.get("eval_input"))
+                link_answer(own_db, message_id, log_id, user_id)
                 yield _sse("done", {
                     "answer":          result["answer"],
                     "sources":         result["sources"],
                     "conversation_id": saved_id,
+                    "message_id":      message_id,
                     "user":            email,
                 })
         except Exception as e:
@@ -466,6 +475,10 @@ def get_logs(
         e.query_log_id: e
         for e in db.query(Evaluation).filter(Evaluation.query_log_id.in_([l.id for l in logs])).all()
     }
+    votes = {
+        f.query_log_id: f
+        for f in db.query(Feedback).filter(Feedback.query_log_id.in_([l.id for l in logs])).all()
+    }
     return [
         {
             "id":               l.id,
@@ -478,6 +491,7 @@ def get_logs(
             "guardrail_hit":    l.guardrail_hit,
             "timestamp":        _utc_iso(l.timestamp),
             **eval_fields(evals.get(l.id)),
+            "feedback":         feedback_payload(votes.get(l.id)),   # the asker's thumbs up/down
         }
         for l in logs
     ]

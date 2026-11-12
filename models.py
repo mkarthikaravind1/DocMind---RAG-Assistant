@@ -60,6 +60,19 @@ class Evaluation(Base):
     eval_time            = Column(Float)          # seconds
     created_at           = Column(DateTime, default=utcnow)   # stored as UTC
 
+class Feedback(Base):
+    """A user's vote on one AI answer. A rating and a preset reason only, no text."""
+    __tablename__ = "feedback"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    message_id   = Column(Integer, unique=True, index=True)   # the rated answer; None once its chat is deleted
+    query_log_id = Column(Integer, index=True)                # None for answers saved before feedback existed
+    user_id      = Column(Integer, index=True)
+    rating       = Column(String(10))        # "up", "down" or None (not rated)
+    reason       = Column(String(30))        # preset reason for a "down", or None
+    created_at   = Column(DateTime, default=utcnow)   # stored as UTC
+    updated_at   = Column(DateTime, default=utcnow)
+
 class QueryLog(Base):
     __tablename__ = "query_logs"
     id               = Column(Integer, primary_key=True, index=True)

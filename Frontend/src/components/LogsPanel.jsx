@@ -9,6 +9,14 @@ const roleColors = {
   employee: { bg: 'var(--surface3)',   color: 'var(--text3)' },
 };
 
+// Preset thumbs-down reasons (keys come from the backend's feedback.py)
+const reasonLabels = {
+  wrong_answer: 'Wrong answer',
+  missing_info: 'Missing information',
+  wrong_source: 'Wrong source',
+  not_relevant: 'Not relevant',
+};
+
 // Answer quality scores are 0..1; shown as a percentage
 const pct = v => (v === null || v === undefined ? '–' : `${Math.round(v * 100)}%`);
 
@@ -53,6 +61,7 @@ export default function LogsPanel({ token }) {
   const [logs,  setLogs]  = useState([]);
   const [stats, setStats] = useState(null);
   const [quality, setQuality] = useState(null);
+  const [votes, setVotes] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -61,18 +70,21 @@ export default function LogsPanel({ token }) {
 
     const fetchAll = async () => {
       try {
-        const [logsRes, statsRes, qualityRes] = await Promise.all([
-          fetch(`${API}/admin/logs`,        { headers: { Authorization: `Bearer ${token}` } }),
-          fetch(`${API}/admin/logs/stats`,  { headers: { Authorization: `Bearer ${token}` } }),
-          fetch(`${API}/admin/evals/stats`, { headers: { Authorization: `Bearer ${token}` } }),
+        const [logsRes, statsRes, qualityRes, votesRes] = await Promise.all([
+          fetch(`${API}/admin/logs`,           { headers: { Authorization: `Bearer ${token}` } }),
+          fetch(`${API}/admin/logs/stats`,     { headers: { Authorization: `Bearer ${token}` } }),
+          fetch(`${API}/admin/evals/stats`,    { headers: { Authorization: `Bearer ${token}` } }),
+          fetch(`${API}/admin/feedback/stats`, { headers: { Authorization: `Bearer ${token}` } }),
         ]);
         const logsData    = await logsRes.json().catch(() => ({}));
         const statsData   = await statsRes.json().catch(() => ({}));
         const qualityData = await qualityRes.json().catch(() => null);
+        const votesData   = await votesRes.json().catch(() => null);
         if (cancelled) return;
 
-        // Quality scores are an extra: if they fail to load, the rest still shows
+        // Quality scores and feedback are extras: if they fail to load, the rest still shows
         setQuality(qualityRes.ok && qualityData ? qualityData : null);
+        setVotes(votesRes.ok && votesData ? votesData : null);
 
         // On 401/403 the body is { detail }, not a list: never pass that to .map()
         if (!logsRes.ok || !statsRes.ok || !Array.isArray(logsData)) {
@@ -119,6 +131,19 @@ export default function LogsPanel({ token }) {
       hint: 'Share of evaluated questions the documents could not answer' },
   ] : [];
 
+  const voteCards = votes ? [
+    { label: 'Satisfaction', value: pct(votes.satisfaction), icon: 'ti-mood-smile',
+      alert: votes.satisfaction !== null && votes.satisfaction < 0.5,
+      hint: 'Thumbs up as a share of all rated answers' },
+    { label: 'Answers Rated', value: pct(votes.rated_share), icon: 'ti-checkbox',
+      hint: `${votes.rated} of ${votes.answers} answers were rated` },
+    { label: 'Thumbs Up',   value: votes.up,   icon: 'ti-thumb-up' },
+    { label: 'Thumbs Down', value: votes.down, icon: 'ti-thumb-down', alert: votes.down > votes.up },
+  ] : [];
+  const givenReasons = votes
+    ? Object.entries(votes.reasons || {}).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1])
+    : [];
+
   return (
     <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1 }}>
 
@@ -164,6 +189,28 @@ export default function LogsPanel({ token }) {
               ? (quality.sample_rate > 0 ? 'No answers scored yet.' : 'Evaluation is switched off.')
               : `${quality.evaluated} answers scored by ${quality.judge_model}`}
             {quality.failed > 0 && ` · ${quality.failed} could not be scored`}
+          </div>
+        </>
+      )}
+
+      {/* User feedback: thumbs up / down on answers */}
+      {votes && (
+        <>
+          <div style={{ ...sectionTitle, marginBottom: '10px' }}>
+            User Feedback
+          </div>
+          <div style={{
+            display: 'grid', gridTemplateColumns: '1fr 1fr',
+            gap: '8px', marginBottom: '6px',
+          }}>
+            {voteCards.map((s, i) => <StatCard key={i} {...s} />)}
+          </div>
+          <div style={{ fontSize: '10px', color: 'var(--text3)', marginBottom: '16px' }}>
+            {votes.rated === 0
+              ? 'No answers rated yet.'
+              : givenReasons.length === 0
+                ? 'No reasons given for thumbs down.'
+                : `Thumbs down reasons: ${givenReasons.map(([key, count]) => `${reasonLabels[key] || key} ${count}`).join(' · ')}`}
           </div>
         </>
       )}
@@ -241,6 +288,21 @@ export default function LogsPanel({ token }) {
                 )}
                 {log.answer_relevancy !== null && log.answer_relevancy !== undefined && (
                   <ScoreChip label="Relevant" value={log.answer_relevancy} threshold={relevancyThreshold} />
+                )}
+                {log.feedback?.rating && (
+                  <span
+                    title={log.feedback.reason ? reasonLabels[log.feedback.reason] || log.feedback.reason : undefined}
+                    style={{
+                      fontSize: '10px', padding: '1px 7px', borderRadius: '20px', fontWeight: 600,
+                      background: log.feedback.rating === 'up' ? 'var(--success-dim)' : 'var(--danger-dim)',
+                      color:      log.feedback.rating === 'up' ? 'var(--success)'     : 'var(--danger)',
+                    }}
+                  >
+                    <i className={`ti ti-thumb-${log.feedback.rating}`} style={{ marginRight: '3px' }} />
+                    {log.feedback.rating === 'up'
+                      ? 'Liked'
+                      : (log.feedback.reason ? reasonLabels[log.feedback.reason] || 'Disliked' : 'Disliked')}
+                  </span>
                 )}
                 {log.eval_status === 'not_answered' && (
                   <span style={{

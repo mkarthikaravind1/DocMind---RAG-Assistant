@@ -152,11 +152,31 @@ export default function App() {
         role: m.role === 'user' ? 'user' : 'ai',
         text: m.text,
         sources: Array.isArray(m.sources) ? m.sources : [],
+        id: m.id,
+        feedback: m.feedback || null,
       })));
       setConversationId(id);
       try { localStorage.setItem('conversationId', String(id)); } catch { /* ignore */ }
     } catch { /* keep the current view */ }
   }, [token, handleLogout]);
+
+  // Thumbs up / down on an answer. Shown at once, and put back if saving fails.
+  const handleFeedback = async (messageId, rating, reason) => {
+    const apply = (feedback) => setMessages(prev => prev.map(m => (m.id === messageId ? { ...m, feedback } : m)));
+    const previous = messages.find(m => m.id === messageId)?.feedback || null;
+    apply({ rating, reason });
+    try {
+      const res = await fetch(`${API}/messages/${messageId}/feedback`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ rating, reason }),
+      });
+      if (res.status === 401) { handleLogout(); return; }
+      if (!res.ok) apply(previous);
+    } catch {
+      apply(previous);
+    }
+  };
 
   const handleNewChat = () => {
     abortRef.current?.abort();
@@ -277,6 +297,8 @@ export default function App() {
               text: frame.data.answer || text || 'No answer was returned.',
               sources: Array.isArray(frame.data.sources) ? frame.data.sources : [],
               streaming: false,
+              id: frame.data.message_id || null,   // lets this answer be rated
+              feedback: null,
             });
             // The exchange is now saved: keep continuing this conversation
             if (frame.data.conversation_id) {
@@ -493,7 +515,10 @@ export default function App() {
           ) : (
             <>
               {messages.map((msg, i) => (
-                <Message key={i} role={msg.role} text={msg.text} sources={msg.sources} streaming={msg.streaming} />
+                <Message
+                  key={i} role={msg.role} text={msg.text} sources={msg.sources} streaming={msg.streaming}
+                  messageId={msg.role === 'ai' ? msg.id : null} feedback={msg.feedback} onFeedback={handleFeedback}
+                />
               ))}
               {isTyping && awaitingFirstToken && <TypingBubble />}
               <div ref={messagesEndRef} />

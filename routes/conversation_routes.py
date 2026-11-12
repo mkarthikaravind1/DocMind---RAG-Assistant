@@ -7,7 +7,8 @@ from access import can_access, roles_from_str
 from chat_history import get_owned_conversation, load_sources
 from database import get_db
 from dependencies import get_current_user
-from models import Conversation, Document, Message, User
+from feedback import detach_messages, feedback_payload
+from models import Conversation, Document, Feedback, Message, User
 
 router = APIRouter()
 
@@ -59,14 +60,22 @@ def get_conversation(
         if can_access(role, roles_from_str(d.allowed_roles))
     }
 
+    votes = {
+        f.message_id: f
+        for f in db.query(Feedback).filter(Feedback.message_id.in_([m.id for m in messages])).all()
+    }
+
     return {
         "id":    conv.id,
         "title": conv.title,
         "messages": [
             {
+                "id":      m.id,
                 "role":    m.role,
                 "text":    m.content,
                 "sources": [s for s in load_sources(m) if s.get("filename") in visible],
+                # The owner's own thumbs up/down on this answer
+                "feedback": feedback_payload(votes.get(m.id)) if m.role == "ai" else None,
             }
             for m in messages
         ],
@@ -80,6 +89,8 @@ def delete_conversation(
     db: Session = Depends(get_db),
 ):
     conv = get_owned_conversation(db, int(current_user.id), conversation_id)  # type: ignore[arg-type]
+    # Votes on these answers stay as statistics, detached from the deleted messages
+    detach_messages(db, [m.id for m in db.query(Message.id).filter(Message.conversation_id == conv.id).all()])
     db.query(Message).filter(Message.conversation_id == conv.id).delete()
     db.delete(conv)
     db.commit()
