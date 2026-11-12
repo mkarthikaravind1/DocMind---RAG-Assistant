@@ -21,6 +21,7 @@ from guardrails import validate_input
 from ingest import ingest_pdf, delete_document_chunks, set_document_roles, IngestError
 from models import User, QueryLog, Document
 from rag import get_answer, stream_answer
+from retrieval import warm_up as warm_up_reranker
 from routes.auth_routes import router as auth_router
 from routes.conversation_routes import router as conversation_router
 from vector_store import get_embeddings
@@ -31,10 +32,12 @@ Base.metadata.create_all(bind=engine)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load the embedding model before the first request, so the first upload
-    # or question is not slow. Set PRELOAD_EMBEDDINGS=0 to skip (tests do).
+    # Load the embedding model and the reranker before the first request, so
+    # the first upload or question is not slow. Set PRELOAD_EMBEDDINGS=0 to
+    # skip (tests do).
     if os.getenv("PRELOAD_EMBEDDINGS", "1") == "1":
         get_embeddings()
+        warm_up_reranker()
     yield
 
 

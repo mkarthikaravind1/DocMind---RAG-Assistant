@@ -9,6 +9,9 @@ model download or Groq API key:
   ChromaDB server  -> an in-memory Chroma client       (patched per test)
   MiniLM embeddings-> FakeEmbeddings (keyword hashing) (patched per test)
   Groq LLM         -> FakeLLM (rule-based, records every prompt it is given)
+  Cross-encoder    -> FakeReranker (word overlap, records every passage it is given)
+
+BM25 keyword search is plain Python, so it runs for real.
 """
 import hashlib
 import json
@@ -128,6 +131,29 @@ class FakeLLM:
         return [p for p in self.prompts if not p.startswith("Rewrite the follow-up question")]
 
 
+# ── Fake reranker ─────────────────────────────────────────────────────────
+class FakeReranker:
+    """
+    Stands in for the cross-encoder: a passage scores one point for every
+    question word it contains. Every passage it is asked to score is recorded,
+    so a test can prove restricted text never reached the reranker either.
+    """
+
+    def __init__(self):
+        self.passages = []
+        self.calls = 0
+        self.fail = False
+
+    def score(self, question, passages):
+        from retrieval import query_terms, tokenize
+        self.calls += 1
+        self.passages.extend(passages)
+        if self.fail:
+            raise RuntimeError("simulated reranker failure")
+        wanted = set(query_terms(question))
+        return [float(len(wanted & set(tokenize(p)))) for p in passages]
+
+
 # ── PDF builder (no third-party library needed) ───────────────────────────
 def make_pdf(pages) -> bytes:
     """pages: a list of pages, each a list of text lines. Returns PDF bytes."""
@@ -207,9 +233,10 @@ def parse_sse(body: str):
 class Env:
     """Everything a test needs: the HTTP client, the fakes and a few shortcuts."""
 
-    def __init__(self, client, llm, chroma, upload_dir):
+    def __init__(self, client, llm, reranker, chroma, upload_dir):
         self.client = client
         self.llm = llm
+        self.reranker = reranker
         self.chroma = chroma
         self.upload_dir = upload_dir
 
@@ -271,6 +298,7 @@ def env(monkeypatch, _chroma):
     import app as app_module
     import database
     import rag
+    import retrieval
     import vector_store
 
     database.Base.metadata.drop_all(bind=database.engine)
@@ -299,7 +327,12 @@ def env(monkeypatch, _chroma):
     monkeypatch.setattr(vector_store, "get_chroma_client", lambda: _chroma)
     monkeypatch.setattr(vector_store, "get_embeddings", lambda: FakeEmbeddings())
 
-    return Env(TestClient(app_module.app), llm, _chroma, upload_dir)
+    reranker = FakeReranker()
+    monkeypatch.setattr(retrieval, "get_reranker", lambda: reranker)
+    monkeypatch.setattr(retrieval, "RERANK_ENABLED", True)
+    retrieval._term_cache.clear()
+
+    return Env(TestClient(app_module.app), llm, reranker, _chroma, upload_dir)
 
 
 @pytest.fixture()

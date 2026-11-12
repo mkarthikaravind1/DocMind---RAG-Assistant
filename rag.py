@@ -5,7 +5,6 @@ import re
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 
-from access import role_filter
 from guardrails import (
     FALLBACK_ANSWER,
     MAX_INPUT_LENGTH,
@@ -14,7 +13,7 @@ from guardrails import (
     check_pii_in_response,
     check_prompt_injection,
 )
-from vector_store import get_vectorstore
+from retrieval import hybrid_search
 
 load_dotenv()
 
@@ -23,12 +22,6 @@ load_dotenv()
 # https://console.groq.com/docs/models
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 llm = ChatGroq(model=GROQ_MODEL, temperature=0)
-
-TOP_K = 3
-# Chroma returns a squared-L2 distance (0 = identical). With the normalised
-# MiniLM embeddings, 1.6 is roughly a cosine similarity of 0.2. Chunks further
-# away than this count as weak matches. Tune with RETRIEVAL_MAX_DISTANCE.
-MAX_DISTANCE = float(os.getenv("RETRIEVAL_MAX_DISTANCE", "1.6"))
 
 SNIPPET_CHARS = 240
 CITATION_RE = re.compile(r"\[(\d+)\]")
@@ -109,23 +102,15 @@ Standalone question:"""
 
 
 def _retrieve(question: str, user_role: str) -> list:
-    """Chunks this role may read that best match the question."""
-    db = get_vectorstore()
+    """
+    Chunks this role may read that best answer the question.
 
-    # Document-level RBAC: the search itself only sees chunks this role is
-    # allowed to read, so restricted text can never end up in the prompt
-    # (and therefore never in the answer or its sources either).
-    scored_docs = db.similarity_search_with_score(
-        question, k=TOP_K, filter=role_filter(user_role)
-    )
-
-    # Keep only the strongly matching chunks when there are any, so weak
-    # neighbours do not dilute the context. Broad requests such as
-    # "summarize this document" match nothing strongly (they score the same as
-    # an unrelated question), so in that case pass the top chunks through and
-    # let the strict prompt decide whether the context answers the question.
-    strong_docs = [doc for doc, distance in scored_docs if distance <= MAX_DISTANCE]
-    return strong_docs or [doc for doc, _ in scored_docs]
+    Hybrid retrieval (see retrieval.py): vector search and BM25 keyword search,
+    fused and reranked by a cross-encoder. Document-level RBAC is applied
+    inside both searches, so restricted text can never end up in the prompt
+    (and therefore never in the answer or its sources either).
+    """
+    return hybrid_search(question, user_role)
 
 
 def _finalize(cleaned_answer: str, retrieved_docs: list) -> dict:
