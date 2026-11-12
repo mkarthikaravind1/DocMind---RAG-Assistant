@@ -32,6 +32,9 @@ ACTIONS = {
     "login":           "A successful sign-in",
     "login_failed":    "A failed sign-in attempt",
     "access_denied":   "A signed-in user was refused a protected action",
+    "logout":          "A sign-out (the session was ended on the server)",
+    "token_reuse":     "A retired refresh token was presented again; its sessions were ended",
+    "rate_limited":    "A rate limit was reached (first refusal of each window)",
 }
 SUCCESS, FAILED, DENIED = "success", "failed", "denied"
 

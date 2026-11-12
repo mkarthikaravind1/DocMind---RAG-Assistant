@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react';
 
 import { API, errorMessage } from '../config';
+import { apiFetch } from '../api';
 
 const roleColors = {
   admin:    { bg: 'var(--danger-dim)',  color: 'var(--danger)' },
@@ -71,10 +72,10 @@ export default function LogsPanel({ token }) {
     const fetchAll = async () => {
       try {
         const [logsRes, statsRes, qualityRes, votesRes] = await Promise.all([
-          fetch(`${API}/admin/logs`,           { headers: { Authorization: `Bearer ${token}` } }),
-          fetch(`${API}/admin/logs/stats`,     { headers: { Authorization: `Bearer ${token}` } }),
-          fetch(`${API}/admin/evals/stats`,    { headers: { Authorization: `Bearer ${token}` } }),
-          fetch(`${API}/admin/feedback/stats`, { headers: { Authorization: `Bearer ${token}` } }),
+          apiFetch(`${API}/admin/logs`,           { headers: { Authorization: `Bearer ${token}` } }),
+          apiFetch(`${API}/admin/logs/stats`,     { headers: { Authorization: `Bearer ${token}` } }),
+          apiFetch(`${API}/admin/evals/stats`,    { headers: { Authorization: `Bearer ${token}` } }),
+          apiFetch(`${API}/admin/feedback/stats`, { headers: { Authorization: `Bearer ${token}` } }),
         ]);
         const logsData    = await logsRes.json().catch(() => ({}));
         const statsData   = await statsRes.json().catch(() => ({}));

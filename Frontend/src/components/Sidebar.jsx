@@ -5,6 +5,7 @@ import LogsPanel from './LogsPanel';
 import ChatsPanel from './ChatsPanel';
 import AuditPanel from './AuditPanel';
 import { API, errorMessage } from '../config';
+import { apiFetch } from '../api';
 
 const styles = {
   sidebar: {
@@ -143,6 +144,7 @@ export default function Sidebar({
   const [status, setStatus] = useState(null); // { type: 'loading'|'success'|'error', msg }
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [flagged, setFlagged] = useState(false);          // last upload was blocked by the injection scan
   const [audience, setAudience] = useState('everyone');   // who can read the next upload
   const [savingAccess, setSavingAccess] = useState(null); // filename being updated
   // A manager cannot publish a document their own role would be locked out of
@@ -161,21 +163,25 @@ export default function Sidebar({
       return;
     }
     setSelectedFile(f);
+    setFlagged(false);
     setStatus({ type: 'info', msg: f.name });
   };
 
-  const handleUpload = async () => {
+  // allowFlagged: an admin confirmed uploading a PDF the injection scan flagged
+  const handleUpload = async (allowFlagged = false) => {
     if (!selectedFile) return;
     setUploading(true);
+    setFlagged(false);
     setStatus({ type: 'loading', msg: 'Uploading & indexing…' });
 
     const form = new FormData();
     form.append('file', selectedFile);
     const chosen = audienceOptions.find(a => a.key === audience) || AUDIENCES[0];
     form.append('allowed_roles', chosen.roles.join(','));
+    if (allowFlagged === true) form.append('allow_flagged', 'true');
 
     try {
-      const res = await fetch(`${API}/upload`, { method: 'POST', headers: {Authorization: `Bearer ${token}` }, body: form });
+      const res = await apiFetch(`${API}/upload`, { method: 'POST', headers: {Authorization: `Bearer ${token}` }, body: form });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setStatus({ type: 'success', msg: `"${data.filename}" ready` });
@@ -184,6 +190,8 @@ export default function Sidebar({
         if (fileRef.current) fileRef.current.value = '';
       } else {
         setStatus({ type: 'error', msg: errorMessage(data, 'Upload failed') });
+        // The scan found text that looks like a prompt injection; an admin may override
+        setFlagged(Boolean(data.injection?.can_override));
       }
     } catch {
       setStatus({ type: 'error', msg: 'Cannot connect to backend' });
@@ -195,7 +203,7 @@ export default function Sidebar({
     if (!window.confirm(`Delete "${filename}"? Its content will no longer be used in answers.`)) return;
     try {
       // encodeURIComponent keeps names containing # ? % or spaces intact
-      const res = await fetch(`${API}/delete/${encodeURIComponent(filename)}`, {
+      const res = await apiFetch(`${API}/delete/${encodeURIComponent(filename)}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -214,7 +222,7 @@ export default function Sidebar({
     if (!chosen) return;
     setSavingAccess(filename);
     try {
-      const res = await fetch(`${API}/documents/${encodeURIComponent(filename)}/access`, {
+      const res = await apiFetch(`${API}/documents/${encodeURIComponent(filename)}/access`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ allowed_roles: chosen.roles }),
@@ -383,10 +391,34 @@ export default function Sidebar({
               flexShrink: 0,
               animation: status.type === 'loading' ? 'spin 0.8s linear infinite' : 'none',
             }} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {/* Errors explain what to do next, so they wrap instead of being cut off */}
+            <span style={status.type === 'error'
+              ? { whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.45 }
+              : { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {status.msg}
             </span>
           </div>
+        )}
+
+        {/* Admin override for a PDF the prompt-injection scan blocked */}
+        {flagged && selectedFile && !uploading && (
+          <button
+            type="button"
+            onClick={() => {
+              if (window.confirm(
+                'This PDF contains text that looks like instructions aimed at the AI. '
+                + 'Upload it anyway only if you trust the document.'
+              )) handleUpload(true);
+            }}
+            style={{
+              width: '100%', marginBottom: '10px', padding: '8px', fontSize: '12px', fontWeight: 600,
+              borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontFamily: 'inherit',
+              border: '1px solid var(--danger)', background: 'transparent', color: 'var(--danger)',
+            }}
+          >
+            <i className="ti ti-alert-triangle" style={{ marginRight: '5px' }} />
+            Upload anyway
+          </button>
         )}
 
         {/* Upload button */}

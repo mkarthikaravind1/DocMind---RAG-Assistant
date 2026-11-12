@@ -6,6 +6,7 @@ import WelcomeScreen from './components/WelcomeScreen';
 import ChatInput from './components/ChatInput';
 import AuthScreen from './components/AuthScreen';
 import { API, errorMessage } from './config';
+import { apiFetch, refreshSession, setAccessToken, signOut } from './api';
 
 // Parses one Server-Sent Events frame ("event: x\ndata: {...}") into { event, data }
 function parseSSE(frame) {
@@ -37,8 +38,10 @@ export default function App() {
   const abortRef = useRef(null);                              // cancels an in-flight answer
   const [backendOnline, setBackendOnline] = useState(null); // null=checking
   const messagesEndRef = useRef(null);
-  // Restored from localStorage so a page refresh does not log the user out
-  const [token, setToken] = useState(() => stored('token'));
+  // The access token is kept in memory only (see api.js). After a page reload
+  // the session is restored from the httpOnly refresh cookie instead.
+  const [token, setToken] = useState(null);
+  const [restoring, setRestoring] = useState(true);
   const [role, setRole] = useState(() => stored('role'));
   // Conversation memory: the chat being continued (null = a new chat) and the saved list
   const [conversationId, setConversationId] = useState(() => {
@@ -57,6 +60,7 @@ export default function App() {
 
   const handleLogout = useCallback(() => {
     abortRef.current?.abort();   // stop any answer still streaming
+    signOut();                   // revokes the refresh token on the server
     try {
       localStorage.removeItem('token');
       localStorage.removeItem('role');
@@ -72,6 +76,21 @@ export default function App() {
     setBackendOnline(null);
   }, []);
 
+  // On page load: exchange the refresh cookie for a new access token
+  useEffect(() => {
+    let cancelled = false;
+    try { localStorage.removeItem('token'); } catch { /* ignore */ }   // from versions that stored it
+    refreshSession().then(session => {
+      if (cancelled) return;
+      if (session) {
+        setToken(session.access_token);
+        setRole(session.role);
+      }
+      setRestoring(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   // Scroll to bottom on new message
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -84,8 +103,8 @@ export default function App() {
     const sync = async () => {
       try {
         const [filesRes, meRes] = await Promise.all([
-          fetch(`${API}/files`, { headers }),
-          fetch(`${API}/auth/me`, { headers }),
+          apiFetch(`${API}/files`, { headers }),
+          apiFetch(`${API}/auth/me`, { headers }),
         ]);
 
         // Token expired or user removed: go back to the login screen
@@ -127,7 +146,7 @@ export default function App() {
   const fetchConversations = useCallback(async () => {
     if (!token) return;
     try {
-      const res = await fetch(`${API}/conversations`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API}/conversations`, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) return;
       const data = await res.json();
       if (Array.isArray(data)) setConversations(data);
@@ -138,7 +157,7 @@ export default function App() {
     if (!token || !id) return;
     abortRef.current?.abort();   // stop an answer that is still streaming into another chat
     try {
-      const res = await fetch(`${API}/conversations/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API}/conversations/${id}`, { headers: { Authorization: `Bearer ${token}` } });
       if (res.status === 401) { handleLogout(); return; }
       if (!res.ok) {
         // Deleted, or belongs to another account: fall back to a new chat
@@ -166,7 +185,7 @@ export default function App() {
     const previous = messages.find(m => m.id === messageId)?.feedback || null;
     apply({ rating, reason });
     try {
-      const res = await fetch(`${API}/messages/${messageId}/feedback`, {
+      const res = await apiFetch(`${API}/messages/${messageId}/feedback`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ rating, reason }),
@@ -188,7 +207,7 @@ export default function App() {
   const handleDeleteConversation = async (id, title) => {
     if (!window.confirm(`Delete the chat "${title || 'Untitled chat'}"? This cannot be undone.`)) return;
     try {
-      const res = await fetch(`${API}/conversations/${id}`, {
+      const res = await apiFetch(`${API}/conversations/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -208,10 +227,8 @@ export default function App() {
   }, [token, fetchConversations, loadConversation]);
 
   const handleLogin = (token, role) => {
-    try {
-      localStorage.setItem('token', token);
-      localStorage.setItem('role', role);
-    } catch { /* ignore */ }
+    setAccessToken(token);
+    try { localStorage.setItem('role', role); } catch { /* ignore */ }
     setToken(token);
     setRole(role);
   };
@@ -247,7 +264,7 @@ export default function App() {
     };
 
     try {
-      const res = await fetch(`${API}/chat/stream`, {
+      const res = await apiFetch(`${API}/chat/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -367,6 +384,17 @@ export default function App() {
 
   const sc = statusConfig[backendOnline];
 
+  if (restoring) {
+    return (
+      <div style={{
+        height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'var(--bg)', color: 'var(--text3)', fontSize: '13px',
+      }}>
+        <i className="ti ti-loader-2" style={{ animation: 'spin 0.8s linear infinite', marginRight: '8px' }} />
+        Restoring your session…
+      </div>
+    );
+  }
   if (!token) return <AuthScreen onLogin={handleLogin} />;
   
   return (

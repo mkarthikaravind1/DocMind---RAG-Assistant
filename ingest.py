@@ -4,11 +4,26 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from access import DEFAULT_ROLES, role_flags
+from guardrails import scan_for_injection
 from vector_store import get_vectorstore
 
 
 class IngestError(Exception):
     """Raised when a PDF cannot be turned into searchable chunks."""
+
+
+def scan_pdf(file_path: str) -> list[dict]:
+    """
+    Look for prompt-injection text in a PDF before it is indexed.
+    Returns [{"page": 2, "label": ..., "excerpt": ...}] (empty = nothing found).
+    Whole pages are scanned, not chunks, so a phrase cannot hide across a chunk boundary.
+    """
+    findings = []
+    for doc in PyPDFLoader(file_path).load():
+        page = doc.metadata.get("page")
+        for finding in scan_for_injection(doc.page_content):
+            findings.append({"page": page + 1 if isinstance(page, int) else None, **finding})
+    return findings
 
 
 def delete_document_chunks(filename: str) -> None:

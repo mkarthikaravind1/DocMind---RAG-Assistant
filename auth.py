@@ -15,7 +15,9 @@ if not SECRET_KEY:
     )
 
 ALGORITHM = "HS256"
-TOKEN_EXPIRE_MINUTES = 60 * 24
+# The access token is short-lived on purpose: a stolen one stops working within
+# minutes. The browser renews it silently with its refresh token (tokens.py).
+TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
 
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()

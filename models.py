@@ -86,6 +86,19 @@ class AuditLog(Base):
     details     = Column(Text)                      # small JSON object: old/new values, counts, reasons
     outcome     = Column(String(20))                # success | failed | denied
 
+class RefreshToken(Base):
+    """A refresh token, stored only as a hash. See tokens.py."""
+    __tablename__ = "refresh_tokens"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(Integer, index=True)
+    token_hash = Column(String(64), unique=True, index=True)   # SHA-256 of the token
+    family     = Column(String(32), index=True)    # all tokens descended from one sign-in
+    created_at = Column(DateTime, default=utcnow)  # stored as UTC
+    expires_at = Column(DateTime)
+    used_at    = Column(DateTime)                  # set when it was exchanged for a new one
+    revoked_at = Column(DateTime)                  # set on sign-out or when reuse was detected
+
 class QueryLog(Base):
     __tablename__ = "query_logs"
     id               = Column(Integer, primary_key=True, index=True)

@@ -1,6 +1,7 @@
 // AuthScreen.jsx
 import React, { useState } from 'react';
 import { API, errorMessage } from '../config';
+import { apiFetch } from '../api';
 
 export default function AuthScreen({ onLogin }) {
   const [mode, setMode] = useState('login'); // 'login' or 'register'
@@ -36,7 +37,7 @@ export default function AuthScreen({ onLogin }) {
     setSuccess('');
     try {
       if (mode === 'register') {
-        const res = await fetch(`${API}/auth/register`, {
+        const res = await apiFetch(`${API}/auth/register`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: form.name.trim(), email, password: form.password }),
@@ -48,7 +49,7 @@ export default function AuthScreen({ onLogin }) {
         setForm(f => ({ ...f, password: '' }));
         setSuccess('Registered! Please log in.');
       } else {
-        const res = await fetch(`${API}/auth/login`, {
+        const res = await apiFetch(`${API}/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password: form.password }),
@@ -56,10 +57,8 @@ export default function AuthScreen({ onLogin }) {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(errorMessage(data, 'Login failed'));
 
-        // Decode role from JWT payload (middle part of token, base64url encoded)
-        const b64 = data.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-        const payload = JSON.parse(atob(b64));
-        onLogin(data.access_token, payload.role);
+        // The response also set the httpOnly refresh cookie that keeps the session alive
+        onLogin(data.access_token, data.role);
       }
     } catch (err) {
       setError(

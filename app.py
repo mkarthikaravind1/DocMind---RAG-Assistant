@@ -3,17 +3,19 @@ import json
 import os
 import shutil
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import audit
+import ratelimit
 from access import DEFAULT_ROLES, can_access, normalize_roles, roles_from_str, roles_to_str
 from chat_history import get_owned_conversation, recent_history, save_exchange
 from database import engine, Base, get_db, SessionLocal
@@ -21,10 +23,11 @@ from evaluation import schedule as schedule_evaluation
 from feedback import feedback_payload, link_answer
 from dependencies import get_current_user, require_role
 from guardrails import validate_input
-from ingest import ingest_pdf, delete_document_chunks, set_document_roles, IngestError
+from ingest import ingest_pdf, delete_document_chunks, scan_pdf, set_document_roles, IngestError
 from models import User, QueryLog, Document, Evaluation, Feedback
 from rag import get_answer, stream_answer
 from retrieval import warm_up as warm_up_reranker
+from tokens import ALLOWED_ORIGINS
 from routes.audit_routes import router as audit_router
 from routes.auth_routes import router as auth_router
 from routes.conversation_routes import router as conversation_router
@@ -49,12 +52,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Comma-separated list, e.g. CORS_ORIGINS=http://localhost:3000,https://myapp.com
-CORS_ORIGINS = [
-    o.strip()
-    for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
-    if o.strip()
-]
+# CORS_ORIGINS in .env (see tokens.py). Credentials are allowed so the browser
+# can send the httpOnly refresh cookie to /auth/refresh and /auth/logout.
+CORS_ORIGINS = ALLOWED_ORIGINS
 
 app.add_middleware(
     CORSMiddleware,
@@ -140,11 +140,15 @@ def upload_file(
     file: UploadFile = File(...),
     # Comma-separated roles allowed to read the document, e.g. "manager,admin"
     allowed_roles: str = Form(",".join(DEFAULT_ROLES)),
+    # Admins only: index the PDF even though it contains text that looks like a prompt injection
+    allow_flagged: bool = Form(False),
     current_user: User = Depends(require_role("admin", "manager")),
     db: Session = Depends(get_db),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
+    ratelimit.enforce("upload", str(current_user.id), "Too many uploads.",
+                      db=db, **audit.actor(current_user), target="POST /upload")
 
     role = str(current_user.role)
     try:
@@ -174,8 +178,34 @@ def upload_file(
     already_existed = record is not None or os.path.exists(file_path)
     previous_roles = roles_from_str(record.allowed_roles) if record else None
 
-    with open(file_path, "wb") as buffer:
+    # Saved under a temporary name first: the stored copy (and an existing
+    # document of the same name) is only replaced once the file passed the scan.
+    incoming = f"{file_path}.{uuid.uuid4().hex}.incoming"
+    with open(incoming, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    # Prompt-injection scan. A file that cannot be read at all is left to the
+    # ingestion step below, which reports that properly.
+    try:
+        findings = scan_pdf(incoming)
+    except Exception:
+        findings = []
+    flagged_pages = sorted({f["page"] for f in findings if f["page"]})
+    if findings and not (allow_flagged and role == "admin"):
+        os.remove(incoming)
+        audit.record(db, "document_upload", **audit.actor(current_user), target=filename, outcome=audit.DENIED,
+                     details={"reason": "possible prompt injection", "pages": flagged_pages,
+                              "kinds": sorted({f["label"] for f in findings})})
+        where = ", ".join(f"page {f['page']}: {f['label']}" for f in findings[:5])
+        return JSONResponse(status_code=422, content={
+            "detail": (
+                f"This PDF contains text that looks like a prompt injection ({where}). It was not uploaded."
+                + (" Upload it anyway only if you trust the document." if role == "admin"
+                   else " Ask an admin to review it.")
+            ),
+            "injection": {"findings": findings[:20], "can_override": role == "admin"},
+        })
+    os.replace(incoming, file_path)
 
     try:
         chunks = ingest_pdf(file_path, roles)
@@ -205,6 +235,8 @@ def upload_file(
     audit.add(db, "document_upload", **audit.actor(current_user), target=filename, details={
         "allowed_roles": roles, "chunks": chunks,
         "replaced": already_existed, "previous_roles": previous_roles,
+        # Present only when an admin chose to index a flagged document
+        **({"injection_override": True, "flagged_pages": flagged_pages} if findings else {}),
     })
     db.commit()   # the document record and its audit row together
 
@@ -215,6 +247,7 @@ def upload_file(
         "allowed_roles": roles,
         "uploaded_by":   str(current_user.email),
         "indexed":       True,
+        "flagged_pages": flagged_pages,     # non-empty only after an admin override
     }
 
 
@@ -366,6 +399,10 @@ def _prepare_chat(request: ChatRequest, current_user: User, db: Session):
     email    = str(current_user.email)
     role     = str(current_user.role)
     user_id  = int(current_user.id)  # type: ignore[arg-type]
+
+    # Rate limit first: a refused request costs nothing and never reaches the LLM
+    ratelimit.enforce("chat", str(user_id), "You are asking questions too quickly.",
+                      db=db, **audit.actor(current_user), target="chat")
 
     error = validate_input(question)
     if error:

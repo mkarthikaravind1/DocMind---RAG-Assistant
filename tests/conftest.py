@@ -371,6 +371,11 @@ def env(monkeypatch, _chroma):
     monkeypatch.setattr(evaluation, "EVAL_MODEL", "")
     monkeypatch.setattr(evaluation, "_pending", 0)
 
+    # Rate limits are real, but every test starts with empty counters
+    import ratelimit
+    ratelimit.reset_all()
+    monkeypatch.setattr(ratelimit, "ENABLED", True)
+
     reranker = FakeReranker()
     monkeypatch.setattr(retrieval, "get_reranker", lambda: reranker)
     monkeypatch.setattr(retrieval, "RERANK_ENABLED", True)

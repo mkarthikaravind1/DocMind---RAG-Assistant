@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 
 import { API, errorMessage } from '../config';
+import { apiFetch } from '../api';
 
 const PAGE = 30;
 
@@ -15,6 +16,9 @@ const ACTIONS = {
   login:           { label: 'Sign-ins',         icon: 'ti-login' },
   login_failed:    { label: 'Failed sign-ins',  icon: 'ti-lock-x' },
   access_denied:   { label: 'Denied attempts',  icon: 'ti-shield-x' },
+  rate_limited:    { label: 'Rate limits hit',  icon: 'ti-clock-pause' },
+  logout:          { label: 'Sign-outs',        icon: 'ti-logout' },
+  token_reuse:     { label: 'Session theft',    icon: 'ti-alert-triangle' },
 };
 
 const outcomeColors = {
@@ -31,6 +35,14 @@ function audience(roles) {
   return 'Admins only';
 }
 
+const limits = {
+  login: 'failed sign-in',
+  login_ip: 'sign-in attempts',
+  register: 'new account',
+  chat: 'question',
+  upload: 'upload',
+};
+
 const reasons = {
   wrong_password: 'wrong password',
   unknown_account: 'no such account',
@@ -45,7 +57,13 @@ function describe(e) {
     case 'role_change':
       return `${who} changed ${e.target} from ${d.from} to ${d.to}`;
     case 'document_upload':
-      if (failed) return `${who} could not upload ${e.target}: ${d.reason || e.outcome}`;
+      if (failed) {
+        const pages = Array.isArray(d.pages) && d.pages.length ? ` (page ${d.pages.join(', ')})` : '';
+        return `${who} could not upload ${e.target}: ${d.reason || e.outcome}${pages}`;
+      }
+      if (d.injection_override) {
+        return `${who} uploaded ${e.target} despite a prompt-injection warning (page ${(d.flagged_pages || []).join(', ')})`;
+      }
       return d.replaced
         ? `${who} replaced ${e.target} (${audience(d.allowed_roles)}, ${d.chunks} chunks)`
         : `${who} uploaded ${e.target} (${audience(d.allowed_roles)}, ${d.chunks} chunks)`;
@@ -63,6 +81,12 @@ function describe(e) {
       return `Failed sign-in for ${e.target} (${reasons[d.reason] || d.reason || 'invalid credentials'})`;
     case 'access_denied':
       return `${who} was refused ${e.target}`;
+    case 'rate_limited':
+      return `${e.actor_email || e.target || 'Someone'} hit the ${limits[d.limit] || d.limit} limit`;
+    case 'logout':
+      return `${who} signed out`;
+    case 'token_reuse':
+      return `A retired session token for ${e.target} was used again; that sign-in was ended`;
     default:
       return `${who}: ${e.action} ${e.target || ''}`;
   }
@@ -80,7 +104,7 @@ export default function AuditPanel({ token }) {
     if (action) params.set('action', action);
     if (before) params.set('before', String(before));
     try {
-      const res = await fetch(`${API}/admin/audit?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API}/admin/audit?${params}`, { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !Array.isArray(data.events)) {
         setError(errorMessage(data, 'Failed to load the audit trail'));

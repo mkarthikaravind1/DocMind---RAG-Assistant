@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react';
 
 import { API, errorMessage } from '../config';
+import { apiFetch } from '../api';
 const ROLES = ['employee', 'manager', 'admin'];
 
 const roleColors = {
@@ -23,7 +24,7 @@ export default function UserPanel({ token }) {
     const fetchUsers = async () => {
       setLoading(true);
       try {
-        const res = await fetch(`${API}/admin/users`, {
+        const res = await apiFetch(`${API}/admin/users`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         const data = await res.json().catch(() => ({}));
@@ -49,7 +50,7 @@ export default function UserPanel({ token }) {
     setUpdating(userId);
     setError('');
     try {
-      const res = await fetch(`${API}/admin/users/${userId}/role`, {
+      const res = await apiFetch(`${API}/admin/users/${userId}/role`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
